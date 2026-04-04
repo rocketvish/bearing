@@ -1,0 +1,16 @@
+[project]
+name = "bearing"
+version = "0.1.0"
+description = "Planning-to-execution orchestrator for Claude Code"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+
+[project.scripts]
+bearing = "bearing:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["bearing", "tasks_schema", "executor", "status_writer"]
