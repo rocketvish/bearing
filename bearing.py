@@ -32,7 +32,7 @@ from tasks_schema import (
     TaskQueue, Task, TaskResult, TaskStatus,
     CheckpointLevel, FailurePolicy, ExecutionConfig,
 )
-from executor import run_task, check_claude_installed
+from executor import run_task, check_cli_installed
 from status_writer import write_status
 
 
@@ -158,14 +158,15 @@ def validate_tasks(project_dir: str) -> bool:
 
 def propagate_context(queue: TaskQueue, completed_task: Task):
     """
-    Auto-inject context from a completed task into its dependents.
+    Auto-inject context and file relevance from a completed task
+    into its dependents.
 
-    When task-001 completes, any task with "task-001" in its depends_on
-    gets a summary appended to its context field. This gives downstream
-    tasks awareness of what changed without the user manually filling it in.
+    Two things propagate:
+    1. A text summary of what was done (appended to context field)
+    2. The completed task's relevant_files (merged into dependent's
+       relevant_files so the executor knows to focus on them)
 
-    Only adds context if the dependent's context doesn't already mention
-    the completed task's ID (so re-runs don't duplicate).
+    Won't duplicate on re-runs.
     """
     if not completed_task.result.summary:
         return
@@ -177,27 +178,51 @@ def propagate_context(queue: TaskQueue, completed_task: Task):
 
     for task in queue.tasks:
         if completed_task.id in task.depends_on:
-            if completed_task.id in task.context:
-                continue
-            if task.context:
-                task.context = f"{task.context}\n{context_entry}"
-            else:
-                task.context = context_entry
+            # Propagate context text
+            if completed_task.id not in task.context:
+                if task.context:
+                    task.context = f"{task.context}\n{context_entry}"
+                else:
+                    task.context = context_entry
+
+            # Propagate file relevance
+            if completed_task.relevant_files:
+                existing = set(task.relevant_files)
+                for f in completed_task.relevant_files:
+                    if f not in existing:
+                        task.relevant_files.append(f)
 
 
 def start_planner(project_dir: str):
     """
-    Launch an interactive Claude Code session pre-loaded with Bearing
-    knowledge. Reads the codebase, understands the task schema, and helps
-    the user break work into tasks.
-
-    This is the recommended entry point for using Bearing.
+    Launch an interactive AI session pre-loaded with Bearing knowledge.
+    Asks which CLI and model to use, then starts the planner.
     """
     project_dir = os.path.abspath(project_dir)
 
-    if not check_claude_installed():
-        print("Error: 'claude' CLI not found in PATH.")
+    # Ask which CLI
+    print("Which CLI for the planner?")
+    print("  1. Claude Code (default)")
+    print("  2. Codex")
+    cli_choice = input("Choice [1]: ").strip()
+
+    if cli_choice == "2":
+        cli = "codex"
+        default_model = "gpt-4.5"
+    else:
+        cli = "claude"
+        default_model = "opus"
+
+    if not check_cli_installed(cli):
+        print(f"Error: '{cli}' not found in PATH.")
         sys.exit(1)
+
+    # Ask which model
+    model = input(f"Model [{default_model}]: ").strip()
+    if not model:
+        model = default_model
+
+    print()
 
     # Load the planner prompt
     if os.path.exists(PLANNER_PROMPT_PATH):
@@ -222,12 +247,19 @@ def start_planner(project_dir: str):
     if hints:
         planner_prompt += "\n\n" + "\n".join(hints)
 
-    planner_prompt += "\n\nStart by reading the codebase, then ask what I want to work on."
+    planner_prompt += "\n\nStart by listing the directory structure (don't read file contents yet) and reading CLAUDE.md if it exists. Then ask what I want to work on."
 
-    print(f"Starting planner in {project_dir}...")
+    print(f"Starting {cli} ({model}) planner in {project_dir}...")
     print()
 
-    cmd = ["claude", "--model", "opus", planner_prompt]
+    # Build CLI command
+    if cli == "claude":
+        cmd = ["claude", "--model", model, planner_prompt]
+    elif cli == "codex":
+        cmd = ["codex", "--model", model, planner_prompt]
+    else:
+        cmd = [cli, planner_prompt]
+
     subprocess.run(cmd, cwd=project_dir)
 
 
@@ -243,7 +275,7 @@ def run_orchestrator(project_dir: str):
     tasks_path = os.path.join(project_dir, TASKS_FILE)
     status_path = os.path.join(project_dir, STATUS_FILE)
 
-    if not check_claude_installed():
+    if not check_cli_installed():
         print("Error: 'claude' CLI not found in PATH.")
         print("Install Claude Code: https://claude.ai/install.sh")
         sys.exit(1)

@@ -35,19 +35,20 @@ class FailurePolicy(str, Enum):
 
 @dataclass
 class ExecutionConfig:
-    """Per-task Claude Code configuration flags."""
+    """Per-task execution configuration."""
+    cli: str = "claude"           # claude | codex | custom command
     model: str = "sonnet"
     effort: str = "high"          # low | medium | high | max
     budget_usd: float = 3.00      # token ceiling (works on subscriptions too)
     max_turns: int = 20
-    permission_mode: str = "auto"  # auto | default
+    permission_mode: str = "auto"  # auto | default (claude only)
     worktree: Optional[str] = None # git worktree name, None = use current branch
     fast_mode: bool = False
 
 
 @dataclass
 class TaskResult:
-    """What comes back from a Claude Code execution."""
+    """What comes back from a CLI execution."""
     status: TaskStatus = TaskStatus.QUEUED
     cost_usd: float = 0.0
     turns_used: int = 0
@@ -57,6 +58,7 @@ class TaskResult:
     summary: str = ""
     error: str = ""
     retry_count: int = 0
+    files_changed: list[str] = field(default_factory=list)  # for context propagation
 
     @property
     def total_tokens(self) -> int:
@@ -70,7 +72,7 @@ class TaskResult:
 
 @dataclass
 class Task:
-    """A single unit of work for Claude Code to execute."""
+    """A single unit of work for a CLI agent to execute."""
     id: str
     name: str
     prompt: str
@@ -78,7 +80,9 @@ class Task:
     depends_on: list[str] = field(default_factory=list)
     checkpoint: CheckpointLevel = CheckpointLevel.AUTO
     on_failure: FailurePolicy = FailurePolicy.PAUSE
-    context: str = ""           # Relevant info from previous tasks
+    context: str = ""               # Relevant info from previous tasks
+    relevant_files: list[str] = field(default_factory=list)   # Files to focus on
+    ignore_patterns: list[str] = field(default_factory=list)  # Files/dirs to skip
     result: TaskResult = field(default_factory=TaskResult)
 
     def to_dict(self) -> dict:
@@ -112,6 +116,8 @@ class Task:
             checkpoint=CheckpointLevel(d.get("checkpoint", "auto")),
             on_failure=FailurePolicy(d.get("on_failure", "pause")),
             context=d.get("context", ""),
+            relevant_files=d.get("relevant_files", []),
+            ignore_patterns=d.get("ignore_patterns", []),
             result=result,
         )
 

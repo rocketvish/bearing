@@ -1,10 +1,14 @@
 """
 Bearing - Task executor
 
-Runs tasks via `claude -p` with the appropriate flags,
-captures output, and parses results.
+Runs tasks via CLI agents (Claude Code, Codex, or custom).
+Assembles focused prompts with relevance directives, then
+captures and parses results.
 
-Output format verified against Claude Code v2.1.x (April 2026).
+Supports:
+  - claude: Full flag support (model, effort, budget, turns, auto mode)
+  - codex: Basic prompt passthrough
+  - Custom: Any CLI that accepts a prompt argument
 """
 
 import subprocess
@@ -14,32 +18,56 @@ import json
 from tasks_schema import Task, TaskResult, TaskStatus
 
 
-def check_claude_installed() -> bool:
-    """Verify claude CLI is available."""
-    return shutil.which("claude") is not None
+# --- Prompt Assembly (CLI-agnostic) ---
 
-
-def build_command(task: Task, project_dir: str) -> list[str]:
+def assemble_prompt(task: Task) -> str:
     """
-    Build the `claude -p` command with all flags for a given task.
+    Build the full prompt from task fields.
 
-    Combines the task prompt with any cross-task context so Claude
-    Code gets everything it needs in a single invocation.
+    This is where context focusing happens. Instead of just passing
+    the raw prompt, we prepend:
+      1. Relevance directives (which files to read, which to skip)
+      2. Context from previous tasks
+      3. The actual task prompt
+
+    The executor sees a focused, curated view of the project
+    rather than having to discover relevance from the full codebase.
     """
-    cfg = task.config
+    parts = []
 
-    # Build the full prompt: context + task prompt
-    full_prompt_parts = []
+    # Relevance directives — tell the agent what matters
+    if task.relevant_files or task.ignore_patterns:
+        focus_lines = []
+        if task.relevant_files:
+            file_list = ", ".join(task.relevant_files)
+            focus_lines.append(
+                f"FOCUS: Read these files first, they are most relevant: {file_list}"
+            )
+        if task.ignore_patterns:
+            skip_list = ", ".join(task.ignore_patterns)
+            focus_lines.append(
+                f"SKIP: Do not read or modify these: {skip_list}"
+            )
+        parts.append("\n".join(focus_lines))
+
+    # Context from completed dependencies
     if task.context:
-        full_prompt_parts.append(
-            f"CONTEXT FROM PREVIOUS TASKS:\n{task.context}\n"
-        )
-    full_prompt_parts.append(task.prompt)
-    full_prompt = "\n".join(full_prompt_parts)
+        parts.append(f"CONTEXT FROM PREVIOUS TASKS:\n{task.context}")
 
+    # The actual task prompt
+    parts.append(task.prompt)
+
+    return "\n\n".join(parts)
+
+
+# --- CLI Command Builders ---
+
+def build_claude_command(task: Task, prompt: str) -> list[str]:
+    """Build a `claude -p` command with full flag support."""
+    cfg = task.config
     cmd = [
         "claude",
-        "-p", full_prompt,
+        "-p", prompt,
         "--model", cfg.model,
         "--output-format", "json",
         "--max-budget-usd", str(cfg.budget_usd),
@@ -58,29 +86,90 @@ def build_command(task: Task, project_dir: str) -> list[str]:
     return cmd
 
 
+def build_codex_command(task: Task, prompt: str) -> list[str]:
+    """Build a `codex` command. Flags will evolve as Codex CLI matures."""
+    cfg = task.config
+    cmd = [
+        "codex",
+        prompt,
+    ]
+
+    # Codex model selection (if supported)
+    if cfg.model:
+        cmd.extend(["--model", cfg.model])
+
+    return cmd
+
+
+def build_custom_command(task: Task, prompt: str) -> list[str]:
+    """Build a command for any custom CLI agent."""
+    return [task.config.cli, prompt]
+
+
+def build_command(task: Task) -> list[str]:
+    """Route to the correct CLI command builder."""
+    prompt = assemble_prompt(task)
+    cli = task.config.cli.lower()
+
+    if cli == "claude":
+        return build_claude_command(task, prompt)
+    elif cli == "codex":
+        return build_codex_command(task, prompt)
+    else:
+        return build_custom_command(task, prompt)
+
+
+def check_cli_installed(cli: str = "claude") -> bool:
+    """Verify the CLI tool is available."""
+    return shutil.which(cli) is not None
+
+
+# --- Output Parsing ---
+
 def parse_claude_output(raw_output: str) -> dict:
     """Parse Claude Code's JSON output."""
     try:
         return json.loads(raw_output)
     except json.JSONDecodeError:
-        return {
-            "result": raw_output,
-            "is_error": False,
-        }
+        return {"result": raw_output, "is_error": False}
 
+
+def parse_codex_output(raw_output: str) -> dict:
+    """
+    Parse Codex CLI output.
+    Format may differ from Claude — adapt as Codex CLI evolves.
+    Falls back to treating raw output as result text.
+    """
+    try:
+        return json.loads(raw_output)
+    except json.JSONDecodeError:
+        return {"result": raw_output, "is_error": False}
+
+
+def parse_output(raw_output: str, cli: str) -> dict:
+    """Route to the correct output parser."""
+    if cli == "claude":
+        return parse_claude_output(raw_output)
+    elif cli == "codex":
+        return parse_codex_output(raw_output)
+    else:
+        # Generic: try JSON, fall back to raw text
+        try:
+            return json.loads(raw_output)
+        except json.JSONDecodeError:
+            return {"result": raw_output, "is_error": False}
+
+
+# --- Field Extractors (Claude format, verified) ---
 
 def extract_cost(data: dict) -> float:
-    """
-    Extract cost from Claude Code's JSON output.
-    Verified field: total_cost_usd (top-level)
-    """
+    """Extract cost. Verified field: total_cost_usd (top-level)."""
     if "total_cost_usd" in data:
         try:
             return float(data["total_cost_usd"])
         except (ValueError, TypeError):
             pass
 
-    # Fallback: sum per-model costs from modelUsage
     if isinstance(data.get("modelUsage"), dict):
         total = 0.0
         for model_data in data["modelUsage"].values():
@@ -97,18 +186,9 @@ def extract_cost(data: dict) -> float:
 
 def extract_tokens(data: dict) -> tuple[int, int, int]:
     """
-    Extract token counts from Claude Code's JSON output.
-    Returns (input_tokens, output_tokens, cache_read_tokens).
-
-    Verified format:
-      usage.input_tokens           — direct (uncached) input
-      usage.cache_creation_input_tokens — freshly cached
-      usage.cache_read_input_tokens    — read from cache (0.1x cost)
-      usage.output_tokens          — model output
-
-    We sum all input types for total input_tokens, and track
-    cache_read_tokens separately since they're 0.1x cost and
-    shouldn't be weighted equally for usage estimates.
+    Extract token counts: (input, output, cache_read).
+    All three input types (direct, cache create, cache read) sum to total input.
+    Cache reads tracked separately since they're 0.1x cost.
     """
     input_tokens = 0
     output_tokens = 0
@@ -123,7 +203,6 @@ def extract_tokens(data: dict) -> tuple[int, int, int]:
         output_tokens = int(usage.get("output_tokens", 0))
         cache_read_tokens = cache_read
 
-    # Fallback: modelUsage (camelCase)
     elif isinstance(data.get("modelUsage"), dict):
         for model_data in data["modelUsage"].values():
             if isinstance(model_data, dict):
@@ -138,15 +217,11 @@ def extract_tokens(data: dict) -> tuple[int, int, int]:
 
 
 def extract_turns(data: dict) -> int:
-    """Extract number of turns used."""
     return int(data.get("num_turns", 0))
 
 
 def extract_summary(data: dict) -> str:
-    """
-    Extract a human-readable summary from Claude's output.
-    Verified field: result (top-level string)
-    """
+    """Extract result text. Verified field: result (top-level string)."""
     if isinstance(data, dict):
         result = data.get("result", "")
         if isinstance(result, str):
@@ -162,7 +237,6 @@ def extract_summary(data: dict) -> str:
 
 
 def extract_error(data: dict) -> str:
-    """Extract error message from Claude's JSON output."""
     errors = data.get("errors", [])
     if errors:
         return "; ".join(str(e) for e in errors)
@@ -173,14 +247,13 @@ def extract_error(data: dict) -> str:
 
 
 def parse_result(parsed: dict, default_status: TaskStatus) -> TaskResult:
-    """Build a TaskResult from parsed Claude Code JSON output."""
+    """Build a TaskResult from parsed CLI output."""
     cost = extract_cost(parsed)
     input_tokens, output_tokens, cache_read_tokens = extract_tokens(parsed)
     turns = extract_turns(parsed)
     summary = extract_summary(parsed)
     error = extract_error(parsed)
 
-    # Determine status
     is_error = parsed.get("is_error", False)
     status = TaskStatus.FAILED if is_error else default_status
 
@@ -196,13 +269,15 @@ def parse_result(parsed: dict, default_status: TaskStatus) -> TaskResult:
     )
 
 
+# --- Task Runner ---
+
 def run_task(task: Task, project_dir: str) -> TaskResult:
     """
-    Execute a single task via `claude -p`.
-
+    Execute a single task via the configured CLI.
     Returns a TaskResult with status, cost, summary, and any errors.
     """
-    cmd = build_command(task, project_dir)
+    cmd = build_command(task)
+    cli = task.config.cli.lower()
 
     try:
         result = subprocess.run(
@@ -213,26 +288,25 @@ def run_task(task: Task, project_dir: str) -> TaskResult:
             timeout=1800,  # 30 min safety net
         )
 
-        # Claude Code puts useful JSON in stdout even on non-zero exit
+        # Parse output (even on non-zero exit — CLI puts useful data in stdout)
         if result.stdout:
-            parsed = parse_claude_output(result.stdout)
-            if isinstance(parsed, dict) and "type" in parsed:
+            parsed = parse_output(result.stdout, cli)
+            if isinstance(parsed, dict) and ("type" in parsed or "result" in parsed):
                 default_status = (
                     TaskStatus.COMPLETED if result.returncode == 0
                     else TaskStatus.FAILED
                 )
                 return parse_result(parsed, default_status)
 
-        # No parseable JSON output
+        # No parseable output
         if result.returncode != 0:
             error_msg = result.stderr.strip() if result.stderr else "Unknown error"
             return TaskResult(
                 status=TaskStatus.FAILED,
-                summary=f"Claude Code exited with code {result.returncode}",
+                summary=f"{cli} exited with code {result.returncode}",
                 error=error_msg,
             )
 
-        # Empty successful output (shouldn't happen)
         return TaskResult(
             status=TaskStatus.COMPLETED,
             summary="(no output)",
@@ -247,8 +321,8 @@ def run_task(task: Task, project_dir: str) -> TaskResult:
     except FileNotFoundError:
         return TaskResult(
             status=TaskStatus.FAILED,
-            summary="claude CLI not found in PATH",
-            error="CLAUDE_NOT_FOUND",
+            summary=f"{cli} CLI not found in PATH",
+            error=f"{cli.upper()}_NOT_FOUND",
         )
     except Exception as e:
         return TaskResult(
