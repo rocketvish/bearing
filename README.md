@@ -106,4 +106,4 @@ Not Conductor (the Mac app for parallel agents). Not Gas Town (20-agent swarms).
 
 Those tools answer "how do I run more agents?" Bearing answers a different question: "how do I think clearly about what to build while AI builds it?"
 
-Four Python files. No UI. No dependencies. MIT licensed.
+This is just four Python files, no UI or dependencies. Uses standard MIT license. 
