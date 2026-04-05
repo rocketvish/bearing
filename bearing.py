@@ -208,57 +208,68 @@ def start_planner(project_dir: str):
 
     if cli_choice == "2":
         cli = "codex"
-        default_model = "gpt-4.5"
+        models = [
+            ("gpt-4.5", "GPT-4.5 (default)"),
+            ("gpt-4o", "GPT-4o"),
+            ("o3", "o3"),
+        ]
     else:
         cli = "claude"
-        default_model = "opus"
+        models = [
+            ("opus", "Opus (default - best for planning)"),
+            ("sonnet", "Sonnet"),
+            ("haiku", "Haiku"),
+        ]
 
     if not check_cli_installed(cli):
         print(f"Error: '{cli}' not found in PATH.")
         sys.exit(1)
 
     # Ask which model
-    model = input(f"Model [{default_model}]: ").strip()
-    if not model:
-        model = default_model
+    print()
+    print("Which model?")
+    for i, (_, label) in enumerate(models, 1):
+        print(f"  {i}. {label}")
+    model_choice = input(f"Choice [1]: ").strip()
+
+    try:
+        model_idx = int(model_choice) - 1 if model_choice else 0
+        model = models[model_idx][0]
+    except (ValueError, IndexError):
+        model = models[0][0]
 
     print()
+    print(f"Starting {cli} ({model}) planner...")
+    print()
 
-    # Load the planner prompt
-    if os.path.exists(PLANNER_PROMPT_PATH):
-        with open(PLANNER_PROMPT_PATH, encoding="utf-8") as f:
-            planner_prompt = f.read()
-    else:
-        planner_prompt = (
-            "You are a planning assistant for Bearing. "
-            "Help the user break work into tasks and write tasks.json. "
-            "Read the codebase first, then ask what they want to build."
-        )
+    # Build the initial prompt — short, tells the agent to read
+    # the full instructions from the planner_prompt.md file
+    initial_parts = [
+        f"Read {PLANNER_PROMPT_PATH} for your planning instructions.",
+    ]
 
-    # Add hints about existing state
     status_path = os.path.join(project_dir, STATUS_FILE)
     tasks_path = os.path.join(project_dir, TASKS_FILE)
 
-    hints = []
     if os.path.exists(status_path):
-        hints.append("Read status.md to see what has been done previously.")
+        initial_parts.append("Read status.md for previous results.")
     if os.path.exists(tasks_path):
-        hints.append("Read tasks.json to see the current task queue.")
-    if hints:
-        planner_prompt += "\n\n" + "\n".join(hints)
+        initial_parts.append("Read tasks.json for the current task queue.")
 
-    planner_prompt += "\n\nStart by listing the directory structure (don't read file contents yet) and reading CLAUDE.md if it exists. Then ask what I want to work on."
+    initial_parts.append(
+        "List the directory structure and read CLAUDE.md if it exists. "
+        "Then ask what I want to work on."
+    )
 
-    print(f"Starting {cli} ({model}) planner in {project_dir}...")
-    print()
+    initial_prompt = " ".join(initial_parts)
 
     # Build CLI command
     if cli == "claude":
-        cmd = ["claude", "--model", model, planner_prompt]
+        cmd = ["claude", "--model", model, initial_prompt]
     elif cli == "codex":
-        cmd = ["codex", "--model", model, planner_prompt]
+        cmd = ["codex", "--model", model, initial_prompt]
     else:
-        cmd = [cli, planner_prompt]
+        cmd = [cli, initial_prompt]
 
     subprocess.run(cmd, cwd=project_dir)
 
