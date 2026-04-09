@@ -1,6 +1,6 @@
 {
   "project": "bearing-benchmark",
-  "description": "Synthetic benchmark for evaluating context compression strategies. 8 tasks with mixed dependency relevance.",
+  "description": "Benchmark for evaluating context compression. Two parallel feature tracks (API + reports) create mixed-relevance context in later tasks.",
   "context_format": "structured",
   "relevance_threshold_keep": 0.6,
   "relevance_threshold_drop": 0.35,
@@ -10,7 +10,7 @@
     {
       "id": "task-001",
       "name": "Database schema",
-      "prompt": "Create src/db.js with a SQLite database using better-sqlite3.\n\nDefine two tables:\n- users: id (INTEGER PRIMARY KEY), email (TEXT UNIQUE NOT NULL), password_hash (TEXT NOT NULL), created_at (TEXT DEFAULT CURRENT_TIMESTAMP)\n- tasks: id (INTEGER PRIMARY KEY), user_id (INTEGER REFERENCES users), title (TEXT NOT NULL), description (TEXT), status (TEXT DEFAULT 'pending' CHECK(status IN ('pending','in_progress','done'))), created_at (TEXT DEFAULT CURRENT_TIMESTAMP)\n\nExport the database instance and a function to initialize the tables.\n\nRun tests after.",
+      "prompt": "Create src/db.js with a SQLite database using sql.js.\n\nDefine three tables:\n- users: id (INTEGER PRIMARY KEY AUTOINCREMENT), email (TEXT UNIQUE NOT NULL), password_hash (TEXT NOT NULL), created_at (TEXT DEFAULT CURRENT_TIMESTAMP)\n- tasks: id (INTEGER PRIMARY KEY AUTOINCREMENT), user_id (INTEGER REFERENCES users), title (TEXT NOT NULL), description (TEXT), status (TEXT DEFAULT 'pending' CHECK(status IN ('pending','in_progress','done'))), created_at (TEXT DEFAULT CURRENT_TIMESTAMP)\n- reports: id (INTEGER PRIMARY KEY AUTOINCREMENT), user_id (INTEGER REFERENCES users), title (TEXT NOT NULL), content_html (TEXT), generated_at (TEXT DEFAULT CURRENT_TIMESTAMP)\n\nExport the database instance and a function initDb() that creates the tables.\n\nRun tests after.",
       "config": {
         "cli": "claude",
         "model": "sonnet",
@@ -29,8 +29,8 @@
     },
     {
       "id": "task-002",
-      "name": "User authentication",
-      "prompt": "Create src/routes/auth.js with user registration and login endpoints.\n\nPOST /api/auth/register — accepts {email, password}, hashes password with bcryptjs, inserts into users table, returns {id, email}.\nPOST /api/auth/login — accepts {email, password}, verifies credentials, returns {token} (JWT signed with process.env.JWT_SECRET or 'dev-secret').\n\nMount the router in src/index.js.\n\nRun tests after.",
+      "name": "Markdown-to-HTML converter",
+      "prompt": "Create src/utils/markdown.js with a function that converts basic Markdown to HTML.\n\nExport convertMarkdown(text) that handles:\n- Headers: # H1, ## H2, ### H3 (convert to <h1>, <h2>, <h3>)\n- Bold: **text** to <strong>text</strong>\n- Italic: *text* to <em>text</em>\n- Unordered lists: lines starting with - to <ul><li>...</li></ul>\n- Paragraphs: blank-line-separated text wrapped in <p> tags\n- Code blocks: ```...``` to <pre><code>...</code></pre>\n\nUse only regex, no external dependencies.\n\nRun tests after.",
       "config": {
         "cli": "claude",
         "model": "sonnet",
@@ -39,18 +39,18 @@
         "max_turns": 15,
         "permission_mode": "auto"
       },
-      "depends_on": ["task-001"],
+      "depends_on": [],
       "checkpoint": "auto",
       "on_failure": "retry_once",
       "context": "",
-      "relevant_files": ["src/db.js", "src/index.js", "CLAUDE.md"],
+      "relevant_files": ["package.json", "CLAUDE.md"],
       "ignore_patterns": ["node_modules"],
       "result": {"status": "queued", "cost_usd": 0, "turns_used": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "summary": "", "error": "", "retry_count": 0, "files_changed": [], "context_chars_original": 0, "context_chars_compressed": 0, "chunks_kept": 0, "chunks_compressed": 0, "chunks_dropped": 0, "scoring_latency_ms": 0, "compression_latency_ms": 0}
     },
     {
       "id": "task-003",
-      "name": "Task CRUD endpoints",
-      "prompt": "Create src/routes/tasks.js with CRUD endpoints for the tasks table.\n\nGET /api/tasks — list all tasks for the authenticated user.\nPOST /api/tasks — create a task {title, description}.\nPUT /api/tasks/:id — update task {title, description, status}.\nDELETE /api/tasks/:id — delete a task.\n\nFor now, do NOT add auth middleware — just accept a user_id query param for testing. Auth will be added later.\n\nMount the router in src/index.js.\n\nRun tests after.",
+      "name": "User authentication",
+      "prompt": "Create src/routes/auth.js with user registration and login endpoints.\n\nPOST /api/auth/register: accepts {email, password}, hash password with bcryptjs, insert into users table, return {id, email} with status 201.\nPOST /api/auth/login: accepts {email, password}, verify credentials, return {token} (JWT signed with process.env.JWT_SECRET or 'dev-secret') with status 200.\n\nReturn appropriate error responses: 409 for duplicate email, 401 for invalid credentials.\n\nMount the router in src/index.js under /api/auth.\n\nRun tests after.",
       "config": {
         "cli": "claude",
         "model": "sonnet",
@@ -69,8 +69,8 @@
     },
     {
       "id": "task-004",
-      "name": "Input validation middleware",
-      "prompt": "Create src/middleware/validate.js with request validation middleware.\n\nExport functions:\n- validateTask(req, res, next) — validates POST/PUT /api/tasks body. Title required and non-empty string. Status must be one of: pending, in_progress, done. Description optional.\n- validateAuth(req, res, next) — validates POST /api/auth body. Email must be valid format. Password must be at least 8 characters.\n\nReturn 400 with {error: 'description'} on validation failure.\n\nApply validateTask to task routes and validateAuth to auth routes in their respective route files.\n\nRun tests after.",
+      "name": "Task CRUD endpoints",
+      "prompt": "Create src/routes/tasks.js with CRUD endpoints for the tasks table.\n\nGET /api/tasks?user_id=N: list all tasks for a user.\nPOST /api/tasks: create a task {user_id, title, description}, return the created task with status 201.\nPUT /api/tasks/:id: update a task {title, description, status}, return updated task.\nDELETE /api/tasks/:id: delete a task, return status 204.\n\nFor now, accept user_id as a query/body param. Auth middleware will be added later.\n\nMount the router in src/index.js under /api/tasks.\n\nRun tests after.",
       "config": {
         "cli": "claude",
         "model": "sonnet",
@@ -79,92 +79,92 @@
         "max_turns": 15,
         "permission_mode": "auto"
       },
-      "depends_on": ["task-002", "task-003"],
+      "depends_on": ["task-001"],
       "checkpoint": "auto",
       "on_failure": "retry_once",
       "context": "",
-      "relevant_files": ["src/routes/tasks.js", "src/routes/auth.js"],
+      "relevant_files": ["src/db.js", "src/index.js", "CLAUDE.md"],
       "ignore_patterns": ["node_modules"],
       "result": {"status": "queued", "cost_usd": 0, "turns_used": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "summary": "", "error": "", "retry_count": 0, "files_changed": [], "context_chars_original": 0, "context_chars_compressed": 0, "chunks_kept": 0, "chunks_compressed": 0, "chunks_dropped": 0, "scoring_latency_ms": 0, "compression_latency_ms": 0}
     },
     {
       "id": "task-005",
-      "name": "Auth middleware for task routes",
-      "prompt": "Create src/middleware/auth.js with JWT authentication middleware.\n\nExport authenticateToken(req, res, next):\n- Reads Authorization header (Bearer <token>)\n- Verifies JWT with process.env.JWT_SECRET or 'dev-secret'\n- Sets req.userId from token payload\n- Returns 401 if missing/invalid token\n\nApply this middleware to all /api/tasks routes so they require authentication.\nUpdate the task routes to use req.userId instead of the user_id query param.\n\nRun tests after.",
+      "name": "Weekly report generator",
+      "prompt": "Create src/reports.js with a report generation module.\n\nExport generateWeeklyReport(userId) that:\n1. Queries the tasks table for all tasks created in the last 7 days for the given user\n2. Groups tasks by status (pending, in_progress, done)\n3. Builds a Markdown string with sections for each status group, listing task titles\n4. Converts the Markdown to HTML using the convertMarkdown utility from src/utils/markdown.js\n5. Inserts a row into the reports table with the generated HTML\n6. Returns {id, title, content_html, generated_at}\n\nThe report title should be 'Weekly Report - {date}'.\n\nAlso add a GET /api/reports?user_id=N endpoint in a new src/routes/reports.js that lists all reports for a user. Mount it in src/index.js.\n\nRun tests after.",
+      "config": {
+        "cli": "claude",
+        "model": "sonnet",
+        "effort": "high",
+        "budget_usd": 3.00,
+        "max_turns": 20,
+        "permission_mode": "auto"
+      },
+      "depends_on": ["task-001", "task-002"],
+      "checkpoint": "auto",
+      "on_failure": "retry_once",
+      "context": "",
+      "relevant_files": ["src/db.js", "src/utils/markdown.js", "src/index.js"],
+      "ignore_patterns": ["node_modules"],
+      "result": {"status": "queued", "cost_usd": 0, "turns_used": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "summary": "", "error": "", "retry_count": 0, "files_changed": [], "context_chars_original": 0, "context_chars_compressed": 0, "chunks_kept": 0, "chunks_compressed": 0, "chunks_dropped": 0, "scoring_latency_ms": 0, "compression_latency_ms": 0}
+    },
+    {
+      "id": "task-006",
+      "name": "Input validation middleware",
+      "prompt": "Create src/middleware/validate.js with request validation middleware.\n\nExport functions:\n- validateTask(req, res, next): validates POST/PUT /api/tasks body. Title is required and must be a non-empty string. Status if provided must be one of: pending, in_progress, done. Description is optional. Return 400 with {error: 'message'} on failure.\n- validateAuth(req, res, next): validates POST /api/auth body. Email must contain @ and a dot. Password must be at least 8 characters. Return 400 with {error: 'message'} on failure.\n\nApply validateTask to the task routes and validateAuth to the auth routes by updating their respective route files.\n\nRun tests after.",
       "config": {
         "cli": "claude",
         "model": "sonnet",
         "effort": "high",
         "budget_usd": 2.00,
         "max_turns": 15,
-        "permission_mode": "auto"
-      },
-      "depends_on": ["task-002", "task-003"],
-      "checkpoint": "auto",
-      "on_failure": "retry_once",
-      "context": "",
-      "relevant_files": ["src/routes/tasks.js", "src/routes/auth.js"],
-      "ignore_patterns": ["node_modules"],
-      "result": {"status": "queued", "cost_usd": 0, "turns_used": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "summary": "", "error": "", "retry_count": 0, "files_changed": [], "context_chars_original": 0, "context_chars_compressed": 0, "chunks_kept": 0, "chunks_compressed": 0, "chunks_dropped": 0, "scoring_latency_ms": 0, "compression_latency_ms": 0}
-    },
-    {
-      "id": "task-006",
-      "name": "Auth unit tests",
-      "prompt": "Create src/routes/auth.test.js with tests for the authentication endpoints using Node's built-in test runner.\n\nTest:\n- POST /api/auth/register with valid data returns 201 and user object\n- POST /api/auth/register with duplicate email returns 409\n- POST /api/auth/register with invalid email returns 400\n- POST /api/auth/login with correct credentials returns token\n- POST /api/auth/login with wrong password returns 401\n- POST /api/auth/login with non-existent email returns 401\n\nUse a test database (separate from main) to avoid data pollution.\n\nRun the tests and make sure they pass.",
-      "config": {
-        "cli": "claude",
-        "model": "sonnet",
-        "effort": "high",
-        "budget_usd": 3.00,
-        "max_turns": 20,
-        "permission_mode": "auto"
-      },
-      "depends_on": ["task-002", "task-004"],
-      "checkpoint": "auto",
-      "on_failure": "retry_once",
-      "context": "",
-      "relevant_files": ["src/routes/auth.js", "src/middleware/validate.js", "src/db.js"],
-      "ignore_patterns": ["node_modules"],
-      "result": {"status": "queued", "cost_usd": 0, "turns_used": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "summary": "", "error": "", "retry_count": 0, "files_changed": [], "context_chars_original": 0, "context_chars_compressed": 0, "chunks_kept": 0, "chunks_compressed": 0, "chunks_dropped": 0, "scoring_latency_ms": 0, "compression_latency_ms": 0}
-    },
-    {
-      "id": "task-007",
-      "name": "Task CRUD unit tests",
-      "prompt": "Create src/routes/tasks.test.js with tests for the task CRUD endpoints using Node's built-in test runner.\n\nTest:\n- GET /api/tasks returns only tasks belonging to the authenticated user\n- POST /api/tasks creates a task and returns 201\n- POST /api/tasks without title returns 400 (validation)\n- PUT /api/tasks/:id updates the task\n- PUT /api/tasks/:id with invalid status returns 400\n- DELETE /api/tasks/:id removes the task\n- All endpoints return 401 without auth token\n\nRegister a test user and get a token before running task tests.\nUse a test database to avoid data pollution.\n\nRun the tests and make sure they pass.",
-      "config": {
-        "cli": "claude",
-        "model": "sonnet",
-        "effort": "high",
-        "budget_usd": 3.00,
-        "max_turns": 20,
         "permission_mode": "auto"
       },
       "depends_on": ["task-003", "task-004", "task-005"],
       "checkpoint": "auto",
       "on_failure": "retry_once",
       "context": "",
-      "relevant_files": ["src/routes/tasks.js", "src/middleware/auth.js", "src/middleware/validate.js", "src/db.js"],
+      "relevant_files": ["src/routes/tasks.js", "src/routes/auth.js"],
+      "ignore_patterns": ["node_modules"],
+      "result": {"status": "queued", "cost_usd": 0, "turns_used": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "summary": "", "error": "", "retry_count": 0, "files_changed": [], "context_chars_original": 0, "context_chars_compressed": 0, "chunks_kept": 0, "chunks_compressed": 0, "chunks_dropped": 0, "scoring_latency_ms": 0, "compression_latency_ms": 0}
+    },
+    {
+      "id": "task-007",
+      "name": "Auth middleware for task routes",
+      "prompt": "Create src/middleware/auth.js with JWT authentication middleware.\n\nExport authenticateToken(req, res, next):\n- Read the Authorization header (Bearer <token>)\n- Verify the JWT with process.env.JWT_SECRET or 'dev-secret'\n- Set req.userId from the token payload\n- Return 401 with {error: 'unauthorized'} if token is missing or invalid\n\nApply this middleware to all /api/tasks routes so they require authentication. Update the task routes to use req.userId instead of the user_id query/body param.\n\nRun tests after.",
+      "config": {
+        "cli": "claude",
+        "model": "sonnet",
+        "effort": "high",
+        "budget_usd": 2.00,
+        "max_turns": 15,
+        "permission_mode": "auto"
+      },
+      "depends_on": ["task-003", "task-004", "task-005"],
+      "checkpoint": "auto",
+      "on_failure": "retry_once",
+      "context": "",
+      "relevant_files": ["src/routes/tasks.js", "src/routes/auth.js"],
       "ignore_patterns": ["node_modules"],
       "result": {"status": "queued", "cost_usd": 0, "turns_used": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "summary": "", "error": "", "retry_count": 0, "files_changed": [], "context_chars_original": 0, "context_chars_compressed": 0, "chunks_kept": 0, "chunks_compressed": 0, "chunks_dropped": 0, "scoring_latency_ms": 0, "compression_latency_ms": 0}
     },
     {
       "id": "task-008",
-      "name": "API documentation",
-      "prompt": "Create API.md with comprehensive API documentation for the task management API.\n\nDocument every endpoint:\n- Method, path, description\n- Request body (with example JSON)\n- Response body (with example JSON)\n- Authentication requirements\n- Possible error codes and messages\n\nAlso include:\n- How to set up the project (npm install, environment variables)\n- How to run the server\n- How to run tests\n\nRead all source files to ensure documentation matches the actual implementation.",
+      "name": "Task CRUD integration tests",
+      "prompt": "Create src/routes/tasks.test.js with integration tests for the task CRUD endpoints using Node's built-in test runner (node:test).\n\nTest:\n- GET /api/tasks returns only tasks belonging to the authenticated user\n- POST /api/tasks creates a task and returns 201\n- POST /api/tasks without title returns 400 (validation)\n- PUT /api/tasks/:id updates the task\n- PUT /api/tasks/:id with invalid status returns 400\n- DELETE /api/tasks/:id removes the task and returns 204\n- All task endpoints return 401 without auth token\n\nSetup: register a test user via POST /api/auth/register, login to get a token, use that token for all task requests. Use a test database (set NODE_ENV=test) to avoid data pollution.\n\nRun the tests and ensure they pass.",
       "config": {
         "cli": "claude",
         "model": "sonnet",
-        "effort": "medium",
-        "budget_usd": 2.00,
-        "max_turns": 15,
+        "effort": "high",
+        "budget_usd": 3.00,
+        "max_turns": 20,
         "permission_mode": "auto"
       },
-      "depends_on": ["task-005", "task-006", "task-007"],
-      "checkpoint": "pause",
+      "depends_on": ["task-006", "task-007"],
+      "checkpoint": "auto",
       "on_failure": "retry_once",
       "context": "",
-      "relevant_files": ["src/routes/auth.js", "src/routes/tasks.js", "src/middleware/auth.js", "src/middleware/validate.js", "src/db.js", "CLAUDE.md"],
-      "ignore_patterns": ["node_modules", "*.test.js"],
+      "relevant_files": ["src/routes/tasks.js", "src/routes/auth.js", "src/middleware/auth.js", "src/middleware/validate.js", "src/db.js"],
+      "ignore_patterns": ["node_modules", "src/utils/", "src/reports.js", "src/routes/reports.js"],
       "result": {"status": "queued", "cost_usd": 0, "turns_used": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "summary": "", "error": "", "retry_count": 0, "files_changed": [], "context_chars_original": 0, "context_chars_compressed": 0, "chunks_kept": 0, "chunks_compressed": 0, "chunks_dropped": 0, "scoring_latency_ms": 0, "compression_latency_ms": 0}
     }
   ]

@@ -33,6 +33,9 @@ from tasks_schema import TaskQueue, TaskStatus
 
 CONDITIONS = ["prose", "structured", "embedding", "embedding+llm"]
 
+# Task statuses that count as "done" for eval purposes
+DONE_STATUSES = {TaskStatus.COMPLETED, TaskStatus.AWAITING_REVIEW}
+
 
 def snapshot_state(project_dir: str, eval_dir: str):
     """Save tasks.json and git state before eval begins."""
@@ -43,7 +46,6 @@ def snapshot_state(project_dir: str, eval_dir: str):
 
 def restore_state(project_dir: str, eval_dir: str):
     """Restore tasks.json and reset git working tree between conditions."""
-    # Restore tasks.json
     snapshot_path = os.path.join(eval_dir, "tasks_original.json")
     tasks_path = os.path.join(project_dir, "tasks.json")
     shutil.copy2(snapshot_path, tasks_path)
@@ -63,6 +65,65 @@ def restore_state(project_dir: str, eval_dir: str):
         os.remove(status_path)
 
 
+def capture_source_files(project_dir: str, condition_dir: str):
+    """
+    Copy all created source files to condition directory for judge evaluation.
+    Captures src/, any new .md files, and any new .js files in root.
+    """
+    src_dir = os.path.join(project_dir, "src")
+    if os.path.exists(src_dir):
+        dest = os.path.join(condition_dir, "src")
+        if os.path.exists(dest):
+            shutil.rmtree(dest)
+        shutil.copytree(src_dir, dest)
+
+    # Copy any created .md files (API.md, etc.) — skip status.md and originals
+    skip_md = {"README.md", "CLAUDE.md", "status.md"}
+    for f in os.listdir(project_dir):
+        if f.endswith(".md") and f not in skip_md:
+            shutil.copy2(
+                os.path.join(project_dir, f),
+                os.path.join(condition_dir, f),
+            )
+
+
+def read_source_files(condition_dir: str) -> str:
+    """
+    Read all source files from a condition directory into a single string.
+    Used to give the judge the actual code that was produced.
+    """
+    parts = []
+
+    src_dir = os.path.join(condition_dir, "src")
+    if os.path.exists(src_dir):
+        for root, _dirs, files in os.walk(src_dir):
+            for fname in sorted(files):
+                filepath = os.path.join(root, fname)
+                relpath = os.path.relpath(filepath, condition_dir)
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    parts.append(f"=== {relpath} ===\n{content}")
+                except Exception:
+                    parts.append(f"=== {relpath} ===\n[could not read]")
+
+    # Read any .md files in condition root (API.md, etc.)
+    for fname in sorted(os.listdir(condition_dir)):
+        fpath = os.path.join(condition_dir, fname)
+        if fname.endswith(".md") and fname not in ("status.md", "results.md") and os.path.isfile(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    content = f.read()
+                parts.append(f"=== {fname} ===\n{content}")
+            except Exception:
+                pass
+
+    if not parts:
+        return "No source files found."
+
+    return "\n\n".join(parts)
+
+
 def run_condition(project_dir: str, condition: str, eval_dir: str) -> dict:
     """
     Run bearing with a specific format condition.
@@ -75,7 +136,6 @@ def run_condition(project_dir: str, condition: str, eval_dir: str) -> dict:
     print(f"  Condition: {condition}")
     print(f"{'='*60}\n")
 
-    # Run bearing
     t0 = time.time()
     cmd = [
         sys.executable, "-m", "bearing", "run", project_dir,
@@ -88,7 +148,6 @@ def run_condition(project_dir: str, condition: str, eval_dir: str) -> dict:
     if result.stderr:
         print(result.stderr)
 
-    # Collect results
     tasks_path = os.path.join(project_dir, "tasks.json")
     queue = TaskQueue.load(tasks_path)
 
@@ -105,6 +164,9 @@ def run_condition(project_dir: str, condition: str, eval_dir: str) -> dict:
         if os.path.exists(condition_debug):
             shutil.rmtree(condition_debug)
         shutil.copytree(debug_dir, condition_debug)
+
+    # Capture actual source files BEFORE git reset
+    capture_source_files(project_dir, condition_dir)
 
     # Extract metrics per task
     task_metrics = []
@@ -128,7 +190,7 @@ def run_condition(project_dir: str, condition: str, eval_dir: str) -> dict:
             "compression_latency_ms": r.compression_latency_ms,
         })
 
-    completed = sum(1 for t in queue.tasks if t.result.status == TaskStatus.COMPLETED)
+    completed = sum(1 for t in queue.tasks if t.result.status in DONE_STATUSES)
     failed = sum(1 for t in queue.tasks if t.result.status == TaskStatus.FAILED)
 
     return {
@@ -144,20 +206,30 @@ def run_condition(project_dir: str, condition: str, eval_dir: str) -> dict:
     }
 
 
-def judge_task(task_prompt: str, task_output: str, temp_dir: str) -> dict:
+def judge_task(task_prompt: str, source_files: str, temp_dir: str) -> dict:
     """
-    Use claude -p to judge task output quality.
-    Returns scores dict or None if judging fails.
+    Use claude -p to judge task output quality by examining actual source files.
+    Returns scores dict.
     """
+    if len(source_files) > 6000:
+        source_files = source_files[:6000] + "\n\n[... truncated for length ...]"
+
     judge_prompt = (
-        "You are evaluating AI-generated code task output quality. "
-        "Rate on three dimensions (1-5 scale):\n\n"
-        "1. Completeness: Did the output address everything in the task prompt?\n"
-        "2. Correctness: Is the code likely to work without errors?\n"
-        "3. Adherence: Did the output follow specific instructions?\n\n"
-        f"TASK PROMPT:\n{task_prompt[:1000]}\n\n"
-        f"TASK OUTPUT:\n{task_output[:2000]}\n\n"
-        "Respond ONLY with JSON: "
+        "You are evaluating whether an AI coding agent completed a task correctly. "
+        "The agent was given a task prompt and produced source files.\n\n"
+        "Rate the ACTUAL SOURCE FILES on three dimensions (1-5 scale):\n"
+        "  1 = not attempted\n"
+        "  2 = partially attempted but major gaps\n"
+        "  3 = mostly complete with some issues\n"
+        "  4 = complete with minor issues\n"
+        "  5 = fully complete and correct\n\n"
+        "Dimensions:\n"
+        "1. Completeness: Do the source files address everything in the task prompt?\n"
+        "2. Correctness: Does the code look functional and error-free?\n"
+        "3. Adherence: Did the code follow the specific instructions (file names, patterns, etc.)?\n\n"
+        f"TASK PROMPT:\n{task_prompt[:1500]}\n\n"
+        f"ACTUAL SOURCE FILES PRODUCED:\n{source_files}\n\n"
+        "Respond ONLY with valid JSON on a single line, no other text:\n"
         '{"completeness": N, "correctness": N, "adherence": N, "notes": "brief explanation"}'
     )
 
@@ -171,18 +243,25 @@ def judge_task(task_prompt: str, task_output: str, temp_dir: str) -> dict:
         )
         if result.stdout:
             parsed = json.loads(result.stdout)
-            # Extract the result text from claude -p output
             result_text = parsed.get("result", "")
             if isinstance(result_text, str):
-                # Try to parse JSON from the result
-                # Strip markdown fences if present
                 clean = result_text.strip()
                 if clean.startswith("```"):
                     clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                json_start = clean.find("{")
+                if json_start >= 0:
+                    clean = clean[json_start:]
+                    json_end = clean.rfind("}") + 1
+                    if json_end > 0:
+                        clean = clean[:json_end]
                 scores = json.loads(clean)
+                for key in ["completeness", "correctness", "adherence"]:
+                    if key in scores and isinstance(scores[key], (int, float)):
+                        scores[key] = max(1, min(5, int(scores[key])))
                 return scores
-    except Exception:
-        pass
+    except Exception as e:
+        return {"completeness": 0, "correctness": 0, "adherence": 0,
+                "notes": f"judge parse failed: {str(e)[:100]}"}
 
     return {"completeness": 0, "correctness": 0, "adherence": 0, "notes": "judge failed"}
 
@@ -190,13 +269,14 @@ def judge_task(task_prompt: str, task_output: str, temp_dir: str) -> dict:
 def run_judges(eval_dir: str, all_results: list[dict]) -> dict:
     """
     Run quality judgments on all conditions' outputs.
-    Returns dict mapping condition -> list of score dicts per task.
+    Reads actual source files from each condition directory.
     """
     import tempfile
     temp_dir = tempfile.mkdtemp(prefix="bearing_judge_")
 
     print(f"\n{'='*60}")
     print(f"  Running quality judgments (Claude Sonnet)")
+    print(f"  Judge evaluates actual source files, not session summaries")
     print(f"{'='*60}\n")
 
     judgments = {}
@@ -209,29 +289,29 @@ def run_judges(eval_dir: str, all_results: list[dict]) -> dict:
             continue
 
         queue = TaskQueue.load(tasks_path)
+        source_files = read_source_files(condition_dir)
         cond_scores = []
 
         for task in queue.tasks:
-            if task.result.status != TaskStatus.COMPLETED:
+            if task.result.status not in DONE_STATUSES:
                 cond_scores.append({
                     "id": task.id,
                     "status": task.result.status.value,
                     "completeness": 0,
                     "correctness": 0,
                     "adherence": 0,
-                    "notes": "task did not complete",
+                    "notes": f"task status: {task.result.status.value}",
                 })
                 continue
 
             print(f"  Judging: {condition} / {task.id}...")
-            scores = judge_task(task.prompt, task.result.summary, temp_dir)
+            scores = judge_task(task.prompt, source_files, temp_dir)
             scores["id"] = task.id
-            scores["status"] = "completed"
+            scores["status"] = task.result.status.value
             cond_scores.append(scores)
 
         judgments[condition] = cond_scores
 
-    # Clean up temp dir
     shutil.rmtree(temp_dir, ignore_errors=True)
     return judgments
 
@@ -240,7 +320,6 @@ def write_report(eval_dir: str, all_results: list[dict],
                  judgments: dict = None):
     """Write results.md comparison table and results.json raw data."""
 
-    # Write raw JSON
     raw_data = {"timestamp": datetime.now().isoformat(), "results": all_results}
     if judgments:
         raw_data["judgments"] = judgments
@@ -248,7 +327,6 @@ def write_report(eval_dir: str, all_results: list[dict],
     with open(os.path.join(eval_dir, "results.json"), "w", encoding="utf-8") as f:
         json.dump(raw_data, f, indent=2)
 
-    # Write human-readable report
     lines = [
         "# Bearing Evaluation Report",
         f"_Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_",
@@ -257,7 +335,6 @@ def write_report(eval_dir: str, all_results: list[dict],
         "",
     ]
 
-    # Header row
     header = "| Metric |"
     separator = "|--------|"
     for r in all_results:
@@ -265,7 +342,6 @@ def write_report(eval_dir: str, all_results: list[dict],
         separator += "--------|"
     lines.extend([header, separator])
 
-    # Metrics rows
     def row(label, key, fmt=str):
         line = f"| {label} |"
         for r in all_results:
@@ -279,27 +355,27 @@ def write_report(eval_dir: str, all_results: list[dict],
     lines.append(row("Output tokens", "total_output_tokens", lambda x: f"{x:,}"))
     lines.append(row("Wall time", "wall_time_s", lambda x: f"{x:.0f}s"))
 
-    # Context metrics (from per-task data)
     for r in all_results:
         total_original = sum(t["context_chars_original"] for t in r["tasks"])
         total_compressed = sum(t["context_chars_compressed"] for t in r["tasks"])
         r["total_context_original"] = total_original
         r["total_context_compressed"] = total_compressed
         r["total_chunks_dropped"] = sum(t["chunks_dropped"] for t in r["tasks"])
+        r["total_chunks_kept"] = sum(t["chunks_kept"] for t in r["tasks"])
 
     lines.append(row("Context chars (original)", "total_context_original", lambda x: f"{x:,}"))
     lines.append(row("Context chars (final)", "total_context_compressed", lambda x: f"{x:,}"))
+    lines.append(row("Chunks kept", "total_chunks_kept"))
     lines.append(row("Chunks dropped", "total_chunks_dropped"))
 
     lines.extend(["", ""])
 
-    # Quality scores if available
     if judgments:
-        lines.extend(["## Quality Scores (1-5)", ""])
+        lines.extend(["## Quality Scores (1-5, higher is better)", ""])
 
         header2 = "| Metric |"
         sep2 = "|--------|"
-        for cond in CONDITIONS:
+        for cond in [r["condition"] for r in all_results]:
             if cond in judgments:
                 header2 += f" {cond} |"
                 sep2 += "--------|"
@@ -307,7 +383,7 @@ def write_report(eval_dir: str, all_results: list[dict],
 
         for dim in ["completeness", "correctness", "adherence"]:
             line = f"| {dim.title()} |"
-            for cond in CONDITIONS:
+            for cond in [r["condition"] for r in all_results]:
                 if cond in judgments:
                     scores = [t[dim] for t in judgments[cond] if t.get(dim, 0) > 0]
                     avg = sum(scores) / len(scores) if scores else 0
@@ -316,7 +392,6 @@ def write_report(eval_dir: str, all_results: list[dict],
 
         lines.extend(["", ""])
 
-    # Per-task detail
     lines.extend(["## Per-Task Detail", ""])
     for task_idx in range(len(all_results[0]["tasks"])):
         task_id = all_results[0]["tasks"][task_idx]["id"]
@@ -345,9 +420,20 @@ def write_report(eval_dir: str, all_results: list[dict],
         lines.append(task_row("Chunks dropped", "chunks_dropped"))
         lines.append(task_row("Scoring ms", "scoring_latency_ms"))
 
+        if judgments:
+            for dim in ["completeness", "correctness", "adherence"]:
+                line = f"| Quality: {dim} |"
+                for r in all_results:
+                    cond = r["condition"]
+                    if cond in judgments and task_idx < len(judgments[cond]):
+                        score = judgments[cond][task_idx].get(dim, 0)
+                        line += f" {score} |"
+                    else:
+                        line += " - |"
+                lines.append(line)
+
         lines.extend(["", ""])
 
-    # Compaction estimate
     lines.extend([
         "## Compaction Estimate",
         "",
@@ -357,7 +443,7 @@ def write_report(eval_dir: str, all_results: list[dict],
     for r in all_results:
         cum_tokens = r["total_input_tokens"]
         est_compactions = cum_tokens // 100000
-        lines.append(f"- **{r['condition']}**: {cum_tokens:,} total input tokens → ~{est_compactions} compactions in a shared session (Bearing: 0)")
+        lines.append(f"- **{r['condition']}**: {cum_tokens:,} total input tokens -> ~{est_compactions} compactions in a shared session (Bearing: 0)")
     lines.append("")
 
     with open(os.path.join(eval_dir, "results.md"), "w", encoding="utf-8") as f:
@@ -377,13 +463,11 @@ def run_eval(project_dir: str, skip_judge: bool = False):
         print(f"Error: tasks.json not found in {project_dir}")
         sys.exit(1)
 
-    # Verify git repo
     if not os.path.exists(os.path.join(project_dir, ".git")):
         print("Error: Project must be a git repo for eval (needed for codebase reset)")
         print("Run: git init && git add . && git commit -m 'benchmark baseline'")
         sys.exit(1)
 
-    # Check for uncommitted changes
     result = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=project_dir, capture_output=True, text=True,
@@ -398,10 +482,8 @@ def run_eval(project_dir: str, skip_judge: bool = False):
     print(f"Conditions: {', '.join(CONDITIONS)}")
     print()
 
-    # Snapshot
     snapshot_state(project_dir, eval_dir)
 
-    # Check Ollama for embedding conditions
     from relevance import warmup
     print("Checking Ollama models...")
     queue = TaskQueue.load(tasks_path)
@@ -420,22 +502,18 @@ def run_eval(project_dir: str, skip_judge: bool = False):
         print("Warning: Skipping embedding+llm condition (compression model not available)")
         conditions_to_run = [c for c in conditions_to_run if c != "embedding+llm"]
 
-    # Run each condition
     all_results = []
     for condition in conditions_to_run:
         restore_state(project_dir, eval_dir)
         cond_result = run_condition(project_dir, condition, eval_dir)
         all_results.append(cond_result)
 
-    # Restore to clean state after all conditions
     restore_state(project_dir, eval_dir)
 
-    # Run quality judges
     judgments = None
     if not skip_judge:
         judgments = run_judges(eval_dir, all_results)
 
-    # Write report
     write_report(eval_dir, all_results, judgments)
 
     print(f"\n{'='*60}")
