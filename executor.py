@@ -2,62 +2,159 @@
 Bearing - Task executor
 
 Runs tasks via CLI agents (Claude Code, Codex, or custom).
-Assembles focused prompts with relevance directives, then
-captures and parses results.
+Assembles focused prompts with relevance directives and
+structured context compression, then captures and parses results.
 
 Supports:
   - claude: Full flag support (model, effort, budget, turns, auto mode)
-  - codex: Basic prompt passthrough
+  - codex: Non-interactive exec mode with --json output
   - Custom: Any CLI that accepts a prompt argument
 """
 
 import subprocess
 import shutil
-import time
 import json
+import re
 from tasks_schema import Task, TaskResult, TaskStatus
 
 
-# --- Prompt Assembly (CLI-agnostic) ---
+# --- Context Compression ---
 
-def assemble_prompt(task: Task) -> str:
+def parse_context_entries(context_text: str) -> list[dict]:
+    """
+    Parse prose context entries into structured dicts.
+
+    Input format (written by propagate_context):
+      [task-001: Add auth hook | files: src/hooks/useAuth.js] Created useAuth...
+      [task-002: Settings page] Created SettingsPage...
+
+    Returns list of:
+      {"id": "task-001", "name": "Add auth hook", "files": [...], "did": "Created..."}
+    """
+    if not context_text.strip():
+        return []
+
+    entries = []
+    for line in context_text.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+
+        # Parse: [task-id: name | files: f1, f2] summary
+        # Or:    [task-id: name] summary (no files)
+        match = re.match(
+            r"\[([^:]+):\s*([^|\]]+?)(?:\s*\|\s*files:\s*([^\]]*))?\]\s*(.*)",
+            line,
+        )
+        if match:
+            task_id = match.group(1).strip()
+            name = match.group(2).strip()
+            files_str = match.group(3)
+            summary = match.group(4).strip()
+            files = (
+                [f.strip() for f in files_str.split(",") if f.strip()]
+                if files_str
+                else []
+            )
+            entries.append({
+                "id": task_id,
+                "name": name,
+                "files": files,
+                "did": summary,
+            })
+        else:
+            # Unparseable line — keep as raw text
+            entries.append({"id": "?", "name": "", "files": [], "did": line})
+
+    return entries
+
+
+def compress_context(context_text: str) -> str:
+    """
+    Convert prose context to structured JSON.
+
+    Prose (stored in tasks.json, human-readable):
+      [task-001: Add auth hook | files: src/hooks/useAuth.js] Created useAuth...
+
+    Structured (sent to executor, token-efficient):
+      PRIOR:[{"id":"task-001","did":"Created useAuth...","files":["src/hooks/useAuth.js"]}]
+    """
+    entries = parse_context_entries(context_text)
+    if not entries:
+        return ""
+
+    compressed = []
+    for e in entries:
+        item = {"id": e["id"], "did": e["did"]}
+        if e["files"]:
+            item["files"] = e["files"]
+        compressed.append(item)
+
+    return "PRIOR:" + json.dumps(compressed, separators=(",", ":"))
+
+
+# --- Prompt Assembly ---
+
+def assemble_prompt(task: Task, context_format: str = "structured") -> tuple[str, dict]:
     """
     Build the full prompt from task fields.
 
-    This is where context focusing happens. Instead of just passing
-    the raw prompt, we prepend:
-      1. Relevance directives (which files to read, which to skip)
-      2. Context from previous tasks
-      3. The actual task prompt
+    Returns (prompt_string, metrics_dict).
 
-    The executor sees a focused, curated view of the project
-    rather than having to discover relevance from the full codebase.
+    Prompt structure:
+      1. Relevance directives (FOCUS/SKIP)
+      2. Context from previous tasks (prose or structured)
+      3. The actual task prompt (always prose)
+
+    Metrics track compression ratio for research evaluation.
     """
     parts = []
+    metrics = {
+        "context_original": len(task.context),
+        "context_compressed": 0,
+        "format": context_format,
+    }
 
-    # Relevance directives — tell the agent what matters
+    # Relevance directives
     if task.relevant_files or task.ignore_patterns:
-        focus_lines = []
-        if task.relevant_files:
-            file_list = ", ".join(task.relevant_files)
-            focus_lines.append(
-                f"FOCUS: Read these files first, they are most relevant: {file_list}"
-            )
-        if task.ignore_patterns:
-            skip_list = ", ".join(task.ignore_patterns)
-            focus_lines.append(
-                f"SKIP: Do not read or modify these: {skip_list}"
-            )
-        parts.append("\n".join(focus_lines))
+        if context_format == "structured":
+            # Compact list format
+            focus_lines = []
+            if task.relevant_files:
+                focus_lines.append("FOCUS:" + json.dumps(task.relevant_files, separators=(",", ":")))
+            if task.ignore_patterns:
+                focus_lines.append("SKIP:" + json.dumps(task.ignore_patterns, separators=(",", ":")))
+            parts.append("\n".join(focus_lines))
+        else:
+            # Prose format
+            focus_lines = []
+            if task.relevant_files:
+                file_list = ", ".join(task.relevant_files)
+                focus_lines.append(
+                    f"FOCUS: Read these files first, they are most relevant: {file_list}"
+                )
+            if task.ignore_patterns:
+                skip_list = ", ".join(task.ignore_patterns)
+                focus_lines.append(
+                    f"SKIP: Do not read or modify these: {skip_list}"
+                )
+            parts.append("\n".join(focus_lines))
 
     # Context from completed dependencies
     if task.context:
-        parts.append(f"CONTEXT FROM PREVIOUS TASKS:\n{task.context}")
+        if context_format == "structured":
+            compressed = compress_context(task.context)
+            if compressed:
+                parts.append(compressed)
+                metrics["context_compressed"] = len(compressed)
+        else:
+            parts.append(f"CONTEXT FROM PREVIOUS TASKS:\n{task.context}")
+            metrics["context_compressed"] = len(task.context)
 
-    # The actual task prompt
+    # The actual task prompt (always prose)
     parts.append(task.prompt)
 
-    return "\n\n".join(parts)
+    return "\n\n".join(parts), metrics
 
 
 # --- CLI Command Builders ---
@@ -87,14 +184,14 @@ def build_claude_command(task: Task, prompt: str) -> list[str]:
 
 
 def build_codex_command(task: Task, prompt: str) -> list[str]:
-    """Build a `codex` command. Flags will evolve as Codex CLI matures."""
+    """Build a `codex exec` command for non-interactive mode."""
     cfg = task.config
     cmd = [
-        "codex",
+        "codex", "exec",
+        "--json",
         prompt,
     ]
 
-    # Codex model selection (if supported)
     if cfg.model:
         cmd.extend(["--model", cfg.model])
 
@@ -106,9 +203,8 @@ def build_custom_command(task: Task, prompt: str) -> list[str]:
     return [task.config.cli, prompt]
 
 
-def build_command(task: Task) -> list[str]:
-    """Route to the correct CLI command builder."""
-    prompt = assemble_prompt(task)
+def build_command(task: Task, prompt: str) -> list[str]:
+    """Route to the correct CLI command builder with pre-assembled prompt."""
     cli = task.config.cli.lower()
 
     if cli == "claude":
@@ -136,14 +232,34 @@ def parse_claude_output(raw_output: str) -> dict:
 
 def parse_codex_output(raw_output: str) -> dict:
     """
-    Parse Codex CLI output.
-    Format may differ from Claude — adapt as Codex CLI evolves.
-    Falls back to treating raw output as result text.
+    Parse Codex CLI JSONL output.
+    codex exec --json outputs newline-delimited JSON events.
+    We take the last text event as the result.
     """
     try:
+        # Try single JSON object first
         return json.loads(raw_output)
     except json.JSONDecodeError:
-        return {"result": raw_output, "is_error": False}
+        pass
+
+    # Try JSONL — take last meaningful event
+    lines = raw_output.strip().split("\n")
+    last_text = ""
+    for line in lines:
+        try:
+            event = json.loads(line)
+            if isinstance(event, dict):
+                # Codex events have a "message" or "content" field
+                if "message" in event:
+                    last_text = event["message"]
+                elif "content" in event:
+                    last_text = event["content"]
+        except json.JSONDecodeError:
+            continue
+
+    if last_text:
+        return {"result": last_text, "is_error": False}
+    return {"result": raw_output, "is_error": False}
 
 
 def parse_output(raw_output: str, cli: str) -> dict:
@@ -153,7 +269,6 @@ def parse_output(raw_output: str, cli: str) -> dict:
     elif cli == "codex":
         return parse_codex_output(raw_output)
     else:
-        # Generic: try JSON, fall back to raw text
         try:
             return json.loads(raw_output)
         except json.JSONDecodeError:
@@ -271,12 +386,20 @@ def parse_result(parsed: dict, default_status: TaskStatus) -> TaskResult:
 
 # --- Task Runner ---
 
-def run_task(task: Task, project_dir: str) -> TaskResult:
+def run_task(task: Task, project_dir: str, prompt: str = None,
+             context_format: str = "structured") -> tuple[TaskResult, dict]:
     """
     Execute a single task via the configured CLI.
-    Returns a TaskResult with status, cost, summary, and any errors.
+
+    If prompt is provided, uses it directly. Otherwise assembles from task fields.
+    Returns (TaskResult, metrics_dict).
     """
-    cmd = build_command(task)
+    if prompt is None:
+        prompt, metrics = assemble_prompt(task, context_format)
+    else:
+        metrics = {"context_original": 0, "context_compressed": 0, "format": context_format}
+
+    cmd = build_command(task, prompt)
     cli = task.config.cli.lower()
 
     try:
@@ -288,7 +411,6 @@ def run_task(task: Task, project_dir: str) -> TaskResult:
             timeout=1800,  # 30 min safety net
         )
 
-        # Parse output (even on non-zero exit — CLI puts useful data in stdout)
         if result.stdout:
             parsed = parse_output(result.stdout, cli)
             if isinstance(parsed, dict) and ("type" in parsed or "result" in parsed):
@@ -296,37 +418,36 @@ def run_task(task: Task, project_dir: str) -> TaskResult:
                     TaskStatus.COMPLETED if result.returncode == 0
                     else TaskStatus.FAILED
                 )
-                return parse_result(parsed, default_status)
+                return parse_result(parsed, default_status), metrics
 
-        # No parseable output
         if result.returncode != 0:
             error_msg = result.stderr.strip() if result.stderr else "Unknown error"
             return TaskResult(
                 status=TaskStatus.FAILED,
                 summary=f"{cli} exited with code {result.returncode}",
                 error=error_msg,
-            )
+            ), metrics
 
         return TaskResult(
             status=TaskStatus.COMPLETED,
             summary="(no output)",
-        )
+        ), metrics
 
     except subprocess.TimeoutExpired:
         return TaskResult(
             status=TaskStatus.FAILED,
             summary="Task timed out after 30 minutes",
             error="TIMEOUT",
-        )
+        ), metrics
     except FileNotFoundError:
         return TaskResult(
             status=TaskStatus.FAILED,
             summary=f"{cli} CLI not found in PATH",
             error=f"{cli.upper()}_NOT_FOUND",
-        )
+        ), metrics
     except Exception as e:
         return TaskResult(
             status=TaskStatus.FAILED,
             summary=f"Unexpected error: {type(e).__name__}",
             error=str(e),
-        )
+        ), metrics

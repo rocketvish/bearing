@@ -59,6 +59,8 @@ class TaskResult:
     error: str = ""
     retry_count: int = 0
     files_changed: list[str] = field(default_factory=list)  # for context propagation
+    context_chars_original: int = 0    # prose context size before compression
+    context_chars_compressed: int = 0  # context size after compression
 
     @property
     def total_tokens(self) -> int:
@@ -127,6 +129,7 @@ class TaskQueue:
     """The full task file. Contains project info + ordered task list."""
     project: str
     description: str = ""
+    context_format: str = "structured"  # "structured" | "prose"
     tasks: list[Task] = field(default_factory=list)
 
     @property
@@ -141,6 +144,7 @@ class TaskQueue:
         data = {
             "project": self.project,
             "description": self.description,
+            "context_format": self.context_format,
             "tasks": [t.to_dict() for t in self.tasks],
         }
         with open(path, "w", encoding="utf-8") as f:
@@ -154,19 +158,20 @@ class TaskQueue:
         return cls(
             project=data["project"],
             description=data.get("description", ""),
+            context_format=data.get("context_format", "structured"),
             tasks=tasks,
         )
 
     def next_task(self) -> Optional[Task]:
         """Returns the next queued task whose dependencies are met."""
-        completed_ids = {
+        resolved_ids = {
             t.id for t in self.tasks
-            if t.result.status == TaskStatus.COMPLETED
+            if t.result.status in (TaskStatus.COMPLETED, TaskStatus.SKIPPED)
         }
         for task in self.tasks:
             if task.result.status != TaskStatus.QUEUED:
                 continue
-            deps_met = all(dep in completed_ids for dep in task.depends_on)
+            deps_met = all(dep in resolved_ids for dep in task.depends_on)
             if deps_met:
                 return task
         return None

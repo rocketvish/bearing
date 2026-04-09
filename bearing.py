@@ -32,7 +32,7 @@ from tasks_schema import (
     TaskQueue, Task, TaskResult, TaskStatus,
     CheckpointLevel, FailurePolicy, ExecutionConfig,
 )
-from executor import run_task, check_cli_installed
+from executor import run_task, check_cli_installed, assemble_prompt
 from status_writer import write_status
 
 
@@ -161,20 +161,36 @@ def propagate_context(queue: TaskQueue, completed_task: Task):
     Auto-inject context and file relevance from a completed task
     into its dependents.
 
-    Two things propagate:
-    1. A text summary of what was done (appended to context field)
-    2. The completed task's relevant_files (merged into dependent's
-       relevant_files so the executor knows to focus on them)
+    Three things propagate:
+    1. A text summary with file attribution (appended to context field)
+    2. The completed task's relevant_files (merged into dependent's list)
+    3. On failure with skip policy: error info for downstream awareness
 
+    Context format in tasks.json is always prose (human-readable).
+    Compression to structured JSON happens at assembly time.
     Won't duplicate on re-runs.
     """
-    if not completed_task.result.summary:
-        return
+    summary_snippet = ""
+    if completed_task.result.summary:
+        summary_snippet = completed_task.result.summary[:300].replace("\n", " ").strip()
 
-    summary_snippet = completed_task.result.summary[:300].replace("\n", " ").strip()
-    context_entry = (
-        f"[{completed_task.id}: {completed_task.name}] {summary_snippet}"
-    )
+    # Build context entry with file attribution
+    files_str = ""
+    if completed_task.relevant_files:
+        files_str = " | files: " + ", ".join(completed_task.relevant_files)
+
+    if completed_task.result.status == TaskStatus.COMPLETED and summary_snippet:
+        context_entry = (
+            f"[{completed_task.id}: {completed_task.name}{files_str}] {summary_snippet}"
+        )
+    elif completed_task.result.status in (TaskStatus.FAILED, TaskStatus.SKIPPED):
+        error_snippet = completed_task.result.error[:150].replace("\n", " ").strip()
+        context_entry = (
+            f"[{completed_task.id}: {completed_task.name} | FAILED] "
+            f"{error_snippet}"
+        )
+    else:
+        return
 
     for task in queue.tasks:
         if completed_task.id in task.depends_on:
@@ -185,12 +201,13 @@ def propagate_context(queue: TaskQueue, completed_task: Task):
                 else:
                     task.context = context_entry
 
-            # Propagate file relevance
-            if completed_task.relevant_files:
-                existing = set(task.relevant_files)
-                for f in completed_task.relevant_files:
-                    if f not in existing:
-                        task.relevant_files.append(f)
+            # Propagate file relevance (success only)
+            if completed_task.result.status == TaskStatus.COMPLETED:
+                if completed_task.relevant_files:
+                    existing = set(task.relevant_files)
+                    for f in completed_task.relevant_files:
+                        if f not in existing:
+                            task.relevant_files.append(f)
 
 
 def start_planner(project_dir: str):
@@ -274,17 +291,21 @@ def start_planner(project_dir: str):
     subprocess.run(cmd, cwd=project_dir)
 
 
-def run_orchestrator(project_dir: str):
+def run_orchestrator(project_dir: str, format_override: str = None):
     """
     Main execution loop.
 
     Processes tasks sequentially, respecting dependencies and checkpoints.
     Writes status.md after each task completes.
+    Logs assembled prompts to debug/ directory for research evaluation.
     Pauses when a checkpoint requires human review.
+
+    format_override: if set, overrides tasks.json context_format for this run.
     """
     project_dir = os.path.abspath(project_dir)
     tasks_path = os.path.join(project_dir, TASKS_FILE)
     status_path = os.path.join(project_dir, STATUS_FILE)
+    debug_dir = os.path.join(project_dir, "debug")
 
     if not check_cli_installed():
         print("Error: 'claude' CLI not found in PATH.")
@@ -296,15 +317,22 @@ def run_orchestrator(project_dir: str):
         print(f"Run: bearing init {project_dir}")
         sys.exit(1)
 
+    # Create debug directory for prompt logs
+    os.makedirs(debug_dir, exist_ok=True)
+
     queue = TaskQueue.load(tasks_path)
+    context_format = format_override or queue.context_format
+
+    override_note = " (override)" if format_override else ""
     print(f"Bearing -- {queue.project}")
-    print(f"Tasks: {len(queue.tasks)}")
+    print(f"Tasks: {len(queue.tasks)}, context: {context_format}{override_note}")
     print()
 
     write_status(queue, status_path, "Starting execution")
 
     while True:
         queue = TaskQueue.load(tasks_path)
+        context_format = format_override or queue.context_format
 
         if queue.is_paused():
             print("\nPaused -- a task is awaiting review.")
@@ -321,17 +349,36 @@ def run_orchestrator(project_dir: str):
             write_status(queue, status_path)
             break
 
+        # Assemble prompt separately for debug logging
+        prompt, metrics = assemble_prompt(task, context_format)
+
+        # Log the exact prompt to debug directory
+        debug_path = os.path.join(debug_dir, f"{task.id}-prompt.txt")
+        with open(debug_path, "w", encoding="utf-8") as f:
+            f.write(f"# Bearing debug: {task.id}\n")
+            f.write(f"# Format: {context_format}\n")
+            if metrics["context_original"] > 0:
+                f.write(f"# Context: {metrics['context_original']} -> {metrics['context_compressed']} chars\n")
+            f.write(f"# ---\n\n")
+            f.write(prompt)
+
         # Execute
         print(f">> Running: {task.id} -- {task.name}")
         print(f"   model={task.config.model} effort={task.config.effort} "
               f"budget=${task.config.budget_usd:.2f}")
+        if metrics["context_original"] > 0:
+            print(f"   context: {metrics['context_original']} -> {metrics['context_compressed']} chars ({context_format})")
 
         task.result.status = TaskStatus.RUNNING
         queue.save(tasks_path)
         write_status(queue, status_path, f"Running: {task.id}")
 
-        result = run_task(task, project_dir)
+        result, _ = run_task(task, project_dir, prompt=prompt, context_format=context_format)
         task.result = result
+
+        # Store compression metrics on the result
+        task.result.context_chars_original = metrics["context_original"]
+        task.result.context_chars_compressed = metrics["context_compressed"]
 
         if result.status == TaskStatus.COMPLETED:
             print(f"   OK -- ${result.cost_usd:.2f}, {result.turns_used} turns")
@@ -368,6 +415,8 @@ def run_orchestrator(project_dir: str):
             elif task.on_failure == FailurePolicy.SKIP:
                 task.result.status = TaskStatus.SKIPPED
                 print(f"   Skipping (failure policy)")
+                # Propagate failure context so downstream tasks know
+                propagate_context(queue, task)
 
         queue.save(tasks_path)
         write_status(queue, status_path)
@@ -533,6 +582,9 @@ def print_usage():
     print("  bearing summary <project_dir>    Quick check (for planner)")
     print("  bearing watch <project_dir>      Live updates as tasks run")
     print()
+    print("Options:")
+    print("  --format structured|prose   Override context format for this run")
+    print()
     print("Workflow:")
     print("  1. cd your-project && bearing start .")
     print("  2. Discuss what you want to build with the planner")
@@ -546,21 +598,44 @@ def main():
         print_usage()
         sys.exit(1)
 
-    command = sys.argv[1]
-    project_dir = sys.argv[2] if len(sys.argv) > 2 else "."
+    # Parse --format flag from anywhere in argv
+    format_override = None
+    filtered_args = [sys.argv[0]]
+    i = 1
+    while i < len(sys.argv):
+        if sys.argv[i] == "--format" and i + 1 < len(sys.argv):
+            format_override = sys.argv[i + 1]
+            if format_override not in ("structured", "prose"):
+                print(f"Error: --format must be 'structured' or 'prose', got '{format_override}'")
+                sys.exit(1)
+            i += 2
+        else:
+            filtered_args.append(sys.argv[i])
+            i += 1
 
-    commands = {
+    command = filtered_args[1] if len(filtered_args) > 1 else None
+    project_dir = filtered_args[2] if len(filtered_args) > 2 else "."
+
+    if command is None:
+        print_usage()
+        sys.exit(1)
+
+    # Commands that take only project_dir
+    simple_commands = {
         "start": start_planner,
         "init": init_project,
         "validate": validate_tasks,
-        "run": run_orchestrator,
         "status": show_status,
         "summary": show_summary,
         "watch": watch_status,
     }
 
-    if command in commands:
-        commands[command](project_dir)
+    if command == "run":
+        run_orchestrator(project_dir, format_override=format_override)
+    elif command in simple_commands:
+        if format_override:
+            print("Note: --format only applies to 'bearing run'")
+        simple_commands[command](project_dir)
     else:
         print(f"Unknown command: {command}")
         print_usage()

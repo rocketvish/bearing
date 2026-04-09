@@ -117,6 +117,14 @@ def write_status(queue: TaskQueue, path: str, message: str = ""):
                 lines.append(" | ".join(usage_parts))
                 lines.append("")
 
+            # Compression metrics
+            if result.context_chars_original > 0 and result.context_chars_compressed > 0:
+                lines.append(
+                    f"Context: {result.context_chars_original} → "
+                    f"{result.context_chars_compressed} chars (structured)"
+                )
+                lines.append("")
+
             if result.summary:
                 lines.append("### Result")
                 lines.append(result.summary[:1500])

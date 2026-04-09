@@ -51,9 +51,14 @@ The full tasks.json wraps these:
 {
   "project": "project-name",
   "description": "What this batch accomplishes",
+  "context_format": "structured",
   "tasks": [...]
 }
 ```
+
+`context_format` controls how prior task context is sent to executors:
+- `"structured"` (default): Context compressed to JSON, FOCUS/SKIP as compact lists. More token-efficient.
+- `"prose"`: Context sent as human-readable text. Useful for debugging or comparison.
 
 ## CLI Options
 
@@ -68,14 +73,14 @@ For example, use Claude with Opus for architectural work and Codex for boilerpla
 
 Two fields control what the executor pays attention to:
 
-- `relevant_files`: List of file paths the agent should read first. These are the most important files for the task. The agent sees: "FOCUS: Read these files first, they are most relevant: src/hooks/useAuth.js, src/components/Settings.jsx"
-- `ignore_patterns`: List of files or directories to skip. The agent sees: "SKIP: Do not read or modify these: node_modules, dist, *.test.js"
+- `relevant_files`: List of file paths the agent should read first. In structured mode, the agent sees: `FOCUS:["src/hooks/useAuth.js","src/components/Settings.jsx"]`
+- `ignore_patterns`: List of files or directories to skip. The agent sees: `SKIP:["node_modules","dist","*.test.js"]`
 
 Why this matters: A fresh executor session has a clean context window. If it reads the entire codebase, most tokens are noise. By telling it exactly which files matter, the prompt stays the loudest signal. This is cheaper (fewer tokens consumed) and produces better results (attention concentrated on relevant code).
 
 Always populate relevant_files when you know which files matter. This is one of the most impactful things you can do as a planner.
 
-When a task completes, its relevant_files automatically propagate to dependent tasks.
+When a task completes, its relevant_files and a summary automatically propagate to dependent tasks. The context is stored as prose in tasks.json (human-readable), then compressed to structured JSON at execution time.
 
 ## Task Design Principles
 
