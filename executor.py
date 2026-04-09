@@ -95,30 +95,45 @@ def compress_context(context_text: str) -> str:
 
 # --- Prompt Assembly ---
 
-def assemble_prompt(task: Task, context_format: str = "structured") -> tuple[str, dict]:
+def assemble_prompt(task: Task, context_format: str = "structured",
+                    threshold_keep: float = 0.6, threshold_drop: float = 0.35,
+                    embedding_model: str = "nomic-embed-text",
+                    compression_model: str = "gemma4:26b") -> tuple[str, dict]:
     """
     Build the full prompt from task fields.
 
     Returns (prompt_string, metrics_dict).
 
+    Four context formats:
+      prose          — v1 behavior, everything as natural language
+      structured     — JSON hooks, FOCUS/SKIP as lists
+      embedding      — relevance scoring + template compression for mid-tier
+      embedding+llm  — relevance scoring + LLM compression for mid-tier
+
     Prompt structure:
       1. Relevance directives (FOCUS/SKIP)
-      2. Context from previous tasks (prose or structured)
+      2. Context from previous tasks (format-dependent)
       3. The actual task prompt (always prose)
-
-    Metrics track compression ratio for research evaluation.
     """
     parts = []
     metrics = {
         "context_original": len(task.context),
         "context_compressed": 0,
         "format": context_format,
+        "chunks_kept": 0,
+        "chunks_compressed": 0,
+        "chunks_dropped": 0,
+        "scoring_latency_ms": 0,
+        "compression_latency_ms": 0,
+        "scores": [],
+        "ollama_available": True,
     }
+
+    use_compact_directives = context_format != "prose"
 
     # Relevance directives
     if task.relevant_files or task.ignore_patterns:
-        if context_format == "structured":
-            # Compact list format
+        if use_compact_directives:
             focus_lines = []
             if task.relevant_files:
                 focus_lines.append("FOCUS:" + json.dumps(task.relevant_files, separators=(",", ":")))
@@ -126,7 +141,6 @@ def assemble_prompt(task: Task, context_format: str = "structured") -> tuple[str
                 focus_lines.append("SKIP:" + json.dumps(task.ignore_patterns, separators=(",", ":")))
             parts.append("\n".join(focus_lines))
         else:
-            # Prose format
             focus_lines = []
             if task.relevant_files:
                 file_list = ", ".join(task.relevant_files)
@@ -142,14 +156,45 @@ def assemble_prompt(task: Task, context_format: str = "structured") -> tuple[str
 
     # Context from completed dependencies
     if task.context:
-        if context_format == "structured":
+        if context_format == "prose":
+            parts.append(f"CONTEXT FROM PREVIOUS TASKS:\n{task.context}")
+            metrics["context_compressed"] = len(task.context)
+
+        elif context_format == "structured":
             compressed = compress_context(task.context)
             if compressed:
                 parts.append(compressed)
                 metrics["context_compressed"] = len(compressed)
-        else:
-            parts.append(f"CONTEXT FROM PREVIOUS TASKS:\n{task.context}")
-            metrics["context_compressed"] = len(task.context)
+
+        elif context_format in ("embedding", "embedding+llm"):
+            from relevance import score_and_compress
+
+            # Split context into per-task chunks
+            chunks = [line.strip() for line in task.context.strip().split("\n") if line.strip()]
+
+            scored_chunks, rel_metrics = score_and_compress(
+                context_chunks=chunks,
+                task_prompt=task.prompt,
+                threshold_keep=threshold_keep,
+                threshold_drop=threshold_drop,
+                embedding_model=embedding_model,
+                compression_model=compression_model,
+                use_llm_compression=(context_format == "embedding+llm"),
+            )
+
+            # Merge relevance metrics
+            metrics["chunks_kept"] = rel_metrics["chunks_kept"]
+            metrics["chunks_compressed"] = rel_metrics["chunks_compressed"]
+            metrics["chunks_dropped"] = rel_metrics["chunks_dropped"]
+            metrics["scoring_latency_ms"] = rel_metrics["scoring_latency_ms"]
+            metrics["compression_latency_ms"] = rel_metrics["compression_latency_ms"]
+            metrics["scores"] = rel_metrics["scores"]
+            metrics["ollama_available"] = rel_metrics["ollama_available"]
+
+            if scored_chunks:
+                context_text = "PRIOR:\n" + "\n".join(scored_chunks)
+                parts.append(context_text)
+                metrics["context_compressed"] = len(context_text)
 
     # The actual task prompt (always prose)
     parts.append(task.prompt)

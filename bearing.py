@@ -328,6 +328,21 @@ def run_orchestrator(project_dir: str, format_override: str = None):
     print(f"Tasks: {len(queue.tasks)}, context: {context_format}{override_note}")
     print()
 
+    # Warm up Ollama models if using embedding-based formats
+    if context_format in ("embedding", "embedding+llm"):
+        from relevance import warmup, clear_cache
+        clear_cache()
+        print("Warming up local models...")
+        status = warmup(
+            embedding_model=queue.embedding_model,
+            compression_model=queue.compression_model,
+            use_llm=(context_format == "embedding+llm"),
+        )
+        if not status["embedding"]:
+            print("Warning: Falling back to structured format (no embedding model)")
+            context_format = "structured"
+        print()
+
     write_status(queue, status_path, "Starting execution")
 
     while True:
@@ -350,7 +365,13 @@ def run_orchestrator(project_dir: str, format_override: str = None):
             break
 
         # Assemble prompt separately for debug logging
-        prompt, metrics = assemble_prompt(task, context_format)
+        prompt, metrics = assemble_prompt(
+            task, context_format,
+            threshold_keep=queue.relevance_threshold_keep,
+            threshold_drop=queue.relevance_threshold_drop,
+            embedding_model=queue.embedding_model,
+            compression_model=queue.compression_model,
+        )
 
         # Log the exact prompt to debug directory
         debug_path = os.path.join(debug_dir, f"{task.id}-prompt.txt")
@@ -359,6 +380,11 @@ def run_orchestrator(project_dir: str, format_override: str = None):
             f.write(f"# Format: {context_format}\n")
             if metrics["context_original"] > 0:
                 f.write(f"# Context: {metrics['context_original']} -> {metrics['context_compressed']} chars\n")
+            if metrics.get("chunks_kept") or metrics.get("chunks_dropped"):
+                f.write(f"# Chunks: kept={metrics['chunks_kept']} compressed={metrics['chunks_compressed']} dropped={metrics['chunks_dropped']}\n")
+                f.write(f"# Scores: {metrics.get('scores', [])}\n")
+            if metrics.get("scoring_latency_ms"):
+                f.write(f"# Scoring: {metrics['scoring_latency_ms']}ms, Compression: {metrics['compression_latency_ms']}ms\n")
             f.write(f"# ---\n\n")
             f.write(prompt)
 
@@ -368,6 +394,8 @@ def run_orchestrator(project_dir: str, format_override: str = None):
               f"budget=${task.config.budget_usd:.2f}")
         if metrics["context_original"] > 0:
             print(f"   context: {metrics['context_original']} -> {metrics['context_compressed']} chars ({context_format})")
+        if metrics.get("chunks_dropped"):
+            print(f"   relevance: kept={metrics['chunks_kept']} compressed={metrics['chunks_compressed']} dropped={metrics['chunks_dropped']}")
 
         task.result.status = TaskStatus.RUNNING
         queue.save(tasks_path)
@@ -376,9 +404,14 @@ def run_orchestrator(project_dir: str, format_override: str = None):
         result, _ = run_task(task, project_dir, prompt=prompt, context_format=context_format)
         task.result = result
 
-        # Store compression metrics on the result
+        # Store all metrics on the result
         task.result.context_chars_original = metrics["context_original"]
         task.result.context_chars_compressed = metrics["context_compressed"]
+        task.result.chunks_kept = metrics.get("chunks_kept", 0)
+        task.result.chunks_compressed = metrics.get("chunks_compressed", 0)
+        task.result.chunks_dropped = metrics.get("chunks_dropped", 0)
+        task.result.scoring_latency_ms = metrics.get("scoring_latency_ms", 0)
+        task.result.compression_latency_ms = metrics.get("compression_latency_ms", 0)
 
         if result.status == TaskStatus.COMPLETED:
             print(f"   OK -- ${result.cost_usd:.2f}, {result.turns_used} turns")
@@ -578,12 +611,14 @@ def print_usage():
     print("  bearing init <project_dir>      Create starter files")
     print("  bearing validate <project_dir>   Check tasks.json")
     print("  bearing run <project_dir>        Execute queued tasks")
+    print("  bearing eval <project_dir>       Run evaluation (4 conditions)")
     print("  bearing status <project_dir>     Show full status")
     print("  bearing summary <project_dir>    Quick check (for planner)")
     print("  bearing watch <project_dir>      Live updates as tasks run")
     print()
     print("Options:")
-    print("  --format structured|prose   Override context format for this run")
+    print("  --format prose|structured|embedding|embedding+llm")
+    print("                              Override context format for this run")
     print()
     print("Workflow:")
     print("  1. cd your-project && bearing start .")
@@ -605,8 +640,9 @@ def main():
     while i < len(sys.argv):
         if sys.argv[i] == "--format" and i + 1 < len(sys.argv):
             format_override = sys.argv[i + 1]
-            if format_override not in ("structured", "prose"):
-                print(f"Error: --format must be 'structured' or 'prose', got '{format_override}'")
+            if format_override not in ("structured", "prose", "embedding", "embedding+llm"):
+                print(f"Error: --format must be 'prose', 'structured', 'embedding', or 'embedding+llm'")
+                print(f"  Got: '{format_override}'")
                 sys.exit(1)
             i += 2
         else:
@@ -632,6 +668,9 @@ def main():
 
     if command == "run":
         run_orchestrator(project_dir, format_override=format_override)
+    elif command == "eval":
+        from eval_runner import run_eval
+        run_eval(project_dir)
     elif command in simple_commands:
         if format_override:
             print("Note: --format only applies to 'bearing run'")

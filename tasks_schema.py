@@ -61,6 +61,11 @@ class TaskResult:
     files_changed: list[str] = field(default_factory=list)  # for context propagation
     context_chars_original: int = 0    # prose context size before compression
     context_chars_compressed: int = 0  # context size after compression
+    chunks_kept: int = 0               # chunks above keep threshold
+    chunks_compressed: int = 0         # chunks between thresholds (mid-tier)
+    chunks_dropped: int = 0            # chunks below drop threshold
+    scoring_latency_ms: int = 0        # embedding scoring time
+    compression_latency_ms: int = 0    # LLM compression time
 
     @property
     def total_tokens(self) -> int:
@@ -129,7 +134,11 @@ class TaskQueue:
     """The full task file. Contains project info + ordered task list."""
     project: str
     description: str = ""
-    context_format: str = "structured"  # "structured" | "prose"
+    context_format: str = "structured"  # "structured" | "prose" | "embedding" | "embedding+llm"
+    relevance_threshold_keep: float = 0.6    # above this: keep chunk verbatim
+    relevance_threshold_drop: float = 0.35   # below this: drop chunk entirely
+    embedding_model: str = "nomic-embed-text"
+    compression_model: str = "gemma4:26b"
     tasks: list[Task] = field(default_factory=list)
 
     @property
@@ -145,6 +154,10 @@ class TaskQueue:
             "project": self.project,
             "description": self.description,
             "context_format": self.context_format,
+            "relevance_threshold_keep": self.relevance_threshold_keep,
+            "relevance_threshold_drop": self.relevance_threshold_drop,
+            "embedding_model": self.embedding_model,
+            "compression_model": self.compression_model,
             "tasks": [t.to_dict() for t in self.tasks],
         }
         with open(path, "w", encoding="utf-8") as f:
@@ -159,6 +172,10 @@ class TaskQueue:
             project=data["project"],
             description=data.get("description", ""),
             context_format=data.get("context_format", "structured"),
+            relevance_threshold_keep=data.get("relevance_threshold_keep", 0.6),
+            relevance_threshold_drop=data.get("relevance_threshold_drop", 0.35),
+            embedding_model=data.get("embedding_model", "nomic-embed-text"),
+            compression_model=data.get("compression_model", "gemma4:26b"),
             tasks=tasks,
         )
 

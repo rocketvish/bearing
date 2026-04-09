@@ -117,12 +117,23 @@ def write_status(queue: TaskQueue, path: str, message: str = ""):
                 lines.append(" | ".join(usage_parts))
                 lines.append("")
 
-            # Compression metrics
+            # Compression and relevance metrics
             if result.context_chars_original > 0 and result.context_chars_compressed > 0:
                 lines.append(
                     f"Context: {result.context_chars_original} → "
-                    f"{result.context_chars_compressed} chars (structured)"
+                    f"{result.context_chars_compressed} chars"
                 )
+                if result.chunks_kept or result.chunks_dropped:
+                    lines.append(
+                        f"Relevance: kept={result.chunks_kept} "
+                        f"compressed={result.chunks_compressed} "
+                        f"dropped={result.chunks_dropped}"
+                    )
+                if result.scoring_latency_ms:
+                    lines.append(
+                        f"Latency: scoring={result.scoring_latency_ms}ms "
+                        f"compression={result.compression_latency_ms}ms"
+                    )
                 lines.append("")
 
             if result.summary:

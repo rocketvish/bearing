@@ -13,4 +13,4 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["bearing", "tasks_schema", "executor", "status_writer"]
+py-modules = ["bearing", "tasks_schema", "executor", "status_writer", "relevance", "eval_runner"]

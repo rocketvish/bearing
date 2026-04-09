@@ -1,0 +1,6 @@
+node_modules/
+debug/
+eval/
+status.md
+plan.md
+*.db

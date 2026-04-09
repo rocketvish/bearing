@@ -1,12 +1,14 @@
 {
   "project": "my-app",
   "description": "Add user settings page",
+  "context_format": "structured",
   "tasks": [
     {
       "id": "task-001",
       "name": "Create settings page component",
-      "prompt": "Read the current codebase first -- especially src/components/ and src/routes/.\n\nPlan first, show me the plan before implementing.\n\nCreate a settings page with:\n- Theme toggle (light/dark)\n- Language selector\n- Save button that persists to local storage\n- Add a route and nav link\n\nRun tests after.\nUpdate CLAUDE.md with any architectural decisions.",
+      "prompt": "Read the current codebase first -- especially the files listed in FOCUS.\n\nPlan first, show me the plan before implementing.\n\nCreate a settings page with:\n- Theme toggle (light/dark)\n- Language selector\n- Save button that persists to local storage\n- Add a route and nav link\n\nRun tests after.\nUpdate CLAUDE.md with any architectural decisions.",
       "config": {
+        "cli": "claude",
         "model": "sonnet",
         "effort": "high",
         "budget_usd": 3.0,
@@ -19,6 +21,8 @@
       "checkpoint": "pause",
       "on_failure": "retry_once",
       "context": "",
+      "relevant_files": ["src/components/", "src/routes/", "src/App.jsx"],
+      "ignore_patterns": ["node_modules", "dist", "*.test.js"],
       "result": {
         "status": "queued",
         "cost_usd": 0.0,
@@ -28,14 +32,16 @@
         "cache_read_tokens": 0,
         "summary": "",
         "error": "",
-        "retry_count": 0
+        "retry_count": 0,
+        "files_changed": []
       }
     },
     {
       "id": "task-002",
       "name": "Add tests for settings page",
-      "prompt": "Read the current codebase first -- especially the settings page component created in the previous task.\n\nWrite tests covering:\n- Theme toggle switches between light and dark\n- Language selector updates the displayed language\n- Settings persist across page reloads\n\nRun tests after.",
+      "prompt": "Read the settings page component created in the previous task.\n\nWrite tests covering:\n- Theme toggle switches between light and dark\n- Language selector updates the displayed language\n- Settings persist across page reloads\n\nRun tests after.",
       "config": {
+        "cli": "claude",
         "model": "sonnet",
         "effort": "medium",
         "budget_usd": 2.0,
@@ -48,6 +54,8 @@
       "checkpoint": "auto",
       "on_failure": "retry_once",
       "context": "",
+      "relevant_files": [],
+      "ignore_patterns": [],
       "result": {
         "status": "queued",
         "cost_usd": 0.0,
@@ -57,7 +65,8 @@
         "cache_read_tokens": 0,
         "summary": "",
         "error": "",
-        "retry_count": 0
+        "retry_count": 0,
+        "files_changed": []
       }
     }
   ]
