@@ -41,7 +41,7 @@ class ExecutionConfig:
     effort: str = "high"          # low | medium | high | max
     budget_usd: float = 3.00      # token ceiling (works on subscriptions too)
     max_turns: int = 20
-    permission_mode: str = "auto"  # auto | default (claude only)
+    permission_mode: str = "auto"  # auto | default | dangerously_skip (claude only)
     worktree: Optional[str] = None # git worktree name, None = use current branch
     fast_mode: bool = False
 

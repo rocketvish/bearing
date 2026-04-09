@@ -15,17 +15,41 @@
         "cli": "claude",
         "model": "sonnet",
         "effort": "high",
-        "budget_usd": 2.00,
+        "budget_usd": 2.0,
         "max_turns": 15,
-        "permission_mode": "auto"
+        "permission_mode": "dangerously_skip"
       },
       "depends_on": [],
       "checkpoint": "auto",
       "on_failure": "retry_once",
       "context": "",
-      "relevant_files": ["src/index.js", "package.json", "CLAUDE.md"],
-      "ignore_patterns": ["node_modules"],
-      "result": {"status": "queued", "cost_usd": 0, "turns_used": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "summary": "", "error": "", "retry_count": 0, "files_changed": [], "context_chars_original": 0, "context_chars_compressed": 0, "chunks_kept": 0, "chunks_compressed": 0, "chunks_dropped": 0, "scoring_latency_ms": 0, "compression_latency_ms": 0}
+      "relevant_files": [
+        "src/index.js",
+        "package.json",
+        "CLAUDE.md"
+      ],
+      "ignore_patterns": [
+        "node_modules"
+      ],
+      "result": {
+        "status": "queued",
+        "cost_usd": 0,
+        "turns_used": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "summary": "",
+        "error": "",
+        "retry_count": 0,
+        "files_changed": [],
+        "context_chars_original": 0,
+        "context_chars_compressed": 0,
+        "chunks_kept": 0,
+        "chunks_compressed": 0,
+        "chunks_dropped": 0,
+        "scoring_latency_ms": 0,
+        "compression_latency_ms": 0
+      }
     },
     {
       "id": "task-002",
@@ -35,17 +59,40 @@
         "cli": "claude",
         "model": "sonnet",
         "effort": "high",
-        "budget_usd": 2.00,
+        "budget_usd": 2.0,
         "max_turns": 15,
-        "permission_mode": "auto"
+        "permission_mode": "dangerously_skip"
       },
       "depends_on": [],
       "checkpoint": "auto",
       "on_failure": "retry_once",
       "context": "",
-      "relevant_files": ["package.json", "CLAUDE.md"],
-      "ignore_patterns": ["node_modules"],
-      "result": {"status": "queued", "cost_usd": 0, "turns_used": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "summary": "", "error": "", "retry_count": 0, "files_changed": [], "context_chars_original": 0, "context_chars_compressed": 0, "chunks_kept": 0, "chunks_compressed": 0, "chunks_dropped": 0, "scoring_latency_ms": 0, "compression_latency_ms": 0}
+      "relevant_files": [
+        "package.json",
+        "CLAUDE.md"
+      ],
+      "ignore_patterns": [
+        "node_modules"
+      ],
+      "result": {
+        "status": "queued",
+        "cost_usd": 0,
+        "turns_used": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "summary": "",
+        "error": "",
+        "retry_count": 0,
+        "files_changed": [],
+        "context_chars_original": 0,
+        "context_chars_compressed": 0,
+        "chunks_kept": 0,
+        "chunks_compressed": 0,
+        "chunks_dropped": 0,
+        "scoring_latency_ms": 0,
+        "compression_latency_ms": 0
+      }
     },
     {
       "id": "task-003",
@@ -55,17 +102,43 @@
         "cli": "claude",
         "model": "sonnet",
         "effort": "high",
-        "budget_usd": 2.00,
+        "budget_usd": 2.0,
         "max_turns": 15,
-        "permission_mode": "auto"
+        "permission_mode": "dangerously_skip"
       },
-      "depends_on": ["task-001"],
+      "depends_on": [
+        "task-001"
+      ],
       "checkpoint": "auto",
       "on_failure": "retry_once",
       "context": "",
-      "relevant_files": ["src/db.js", "src/index.js", "CLAUDE.md"],
-      "ignore_patterns": ["node_modules"],
-      "result": {"status": "queued", "cost_usd": 0, "turns_used": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "summary": "", "error": "", "retry_count": 0, "files_changed": [], "context_chars_original": 0, "context_chars_compressed": 0, "chunks_kept": 0, "chunks_compressed": 0, "chunks_dropped": 0, "scoring_latency_ms": 0, "compression_latency_ms": 0}
+      "relevant_files": [
+        "src/db.js",
+        "src/index.js",
+        "CLAUDE.md"
+      ],
+      "ignore_patterns": [
+        "node_modules"
+      ],
+      "result": {
+        "status": "queued",
+        "cost_usd": 0,
+        "turns_used": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "summary": "",
+        "error": "",
+        "retry_count": 0,
+        "files_changed": [],
+        "context_chars_original": 0,
+        "context_chars_compressed": 0,
+        "chunks_kept": 0,
+        "chunks_compressed": 0,
+        "chunks_dropped": 0,
+        "scoring_latency_ms": 0,
+        "compression_latency_ms": 0
+      }
     },
     {
       "id": "task-004",
@@ -75,17 +148,43 @@
         "cli": "claude",
         "model": "sonnet",
         "effort": "high",
-        "budget_usd": 2.00,
+        "budget_usd": 2.0,
         "max_turns": 15,
-        "permission_mode": "auto"
+        "permission_mode": "dangerously_skip"
       },
-      "depends_on": ["task-001"],
+      "depends_on": [
+        "task-001"
+      ],
       "checkpoint": "auto",
       "on_failure": "retry_once",
       "context": "",
-      "relevant_files": ["src/db.js", "src/index.js", "CLAUDE.md"],
-      "ignore_patterns": ["node_modules"],
-      "result": {"status": "queued", "cost_usd": 0, "turns_used": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "summary": "", "error": "", "retry_count": 0, "files_changed": [], "context_chars_original": 0, "context_chars_compressed": 0, "chunks_kept": 0, "chunks_compressed": 0, "chunks_dropped": 0, "scoring_latency_ms": 0, "compression_latency_ms": 0}
+      "relevant_files": [
+        "src/db.js",
+        "src/index.js",
+        "CLAUDE.md"
+      ],
+      "ignore_patterns": [
+        "node_modules"
+      ],
+      "result": {
+        "status": "queued",
+        "cost_usd": 0,
+        "turns_used": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "summary": "",
+        "error": "",
+        "retry_count": 0,
+        "files_changed": [],
+        "context_chars_original": 0,
+        "context_chars_compressed": 0,
+        "chunks_kept": 0,
+        "chunks_compressed": 0,
+        "chunks_dropped": 0,
+        "scoring_latency_ms": 0,
+        "compression_latency_ms": 0
+      }
     },
     {
       "id": "task-005",
@@ -95,17 +194,44 @@
         "cli": "claude",
         "model": "sonnet",
         "effort": "high",
-        "budget_usd": 3.00,
+        "budget_usd": 3.0,
         "max_turns": 20,
-        "permission_mode": "auto"
+        "permission_mode": "dangerously_skip"
       },
-      "depends_on": ["task-001", "task-002"],
+      "depends_on": [
+        "task-001",
+        "task-002"
+      ],
       "checkpoint": "auto",
       "on_failure": "retry_once",
       "context": "",
-      "relevant_files": ["src/db.js", "src/utils/markdown.js", "src/index.js"],
-      "ignore_patterns": ["node_modules"],
-      "result": {"status": "queued", "cost_usd": 0, "turns_used": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "summary": "", "error": "", "retry_count": 0, "files_changed": [], "context_chars_original": 0, "context_chars_compressed": 0, "chunks_kept": 0, "chunks_compressed": 0, "chunks_dropped": 0, "scoring_latency_ms": 0, "compression_latency_ms": 0}
+      "relevant_files": [
+        "src/db.js",
+        "src/utils/markdown.js",
+        "src/index.js"
+      ],
+      "ignore_patterns": [
+        "node_modules"
+      ],
+      "result": {
+        "status": "queued",
+        "cost_usd": 0,
+        "turns_used": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "summary": "",
+        "error": "",
+        "retry_count": 0,
+        "files_changed": [],
+        "context_chars_original": 0,
+        "context_chars_compressed": 0,
+        "chunks_kept": 0,
+        "chunks_compressed": 0,
+        "chunks_dropped": 0,
+        "scoring_latency_ms": 0,
+        "compression_latency_ms": 0
+      }
     },
     {
       "id": "task-006",
@@ -115,17 +241,44 @@
         "cli": "claude",
         "model": "sonnet",
         "effort": "high",
-        "budget_usd": 2.00,
+        "budget_usd": 2.0,
         "max_turns": 15,
-        "permission_mode": "auto"
+        "permission_mode": "dangerously_skip"
       },
-      "depends_on": ["task-003", "task-004", "task-005"],
+      "depends_on": [
+        "task-003",
+        "task-004",
+        "task-005"
+      ],
       "checkpoint": "auto",
       "on_failure": "retry_once",
       "context": "",
-      "relevant_files": ["src/routes/tasks.js", "src/routes/auth.js"],
-      "ignore_patterns": ["node_modules"],
-      "result": {"status": "queued", "cost_usd": 0, "turns_used": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "summary": "", "error": "", "retry_count": 0, "files_changed": [], "context_chars_original": 0, "context_chars_compressed": 0, "chunks_kept": 0, "chunks_compressed": 0, "chunks_dropped": 0, "scoring_latency_ms": 0, "compression_latency_ms": 0}
+      "relevant_files": [
+        "src/routes/tasks.js",
+        "src/routes/auth.js"
+      ],
+      "ignore_patterns": [
+        "node_modules"
+      ],
+      "result": {
+        "status": "queued",
+        "cost_usd": 0,
+        "turns_used": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "summary": "",
+        "error": "",
+        "retry_count": 0,
+        "files_changed": [],
+        "context_chars_original": 0,
+        "context_chars_compressed": 0,
+        "chunks_kept": 0,
+        "chunks_compressed": 0,
+        "chunks_dropped": 0,
+        "scoring_latency_ms": 0,
+        "compression_latency_ms": 0
+      }
     },
     {
       "id": "task-007",
@@ -135,17 +288,44 @@
         "cli": "claude",
         "model": "sonnet",
         "effort": "high",
-        "budget_usd": 2.00,
+        "budget_usd": 2.0,
         "max_turns": 15,
-        "permission_mode": "auto"
+        "permission_mode": "dangerously_skip"
       },
-      "depends_on": ["task-003", "task-004", "task-005"],
+      "depends_on": [
+        "task-003",
+        "task-004",
+        "task-005"
+      ],
       "checkpoint": "auto",
       "on_failure": "retry_once",
       "context": "",
-      "relevant_files": ["src/routes/tasks.js", "src/routes/auth.js"],
-      "ignore_patterns": ["node_modules"],
-      "result": {"status": "queued", "cost_usd": 0, "turns_used": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "summary": "", "error": "", "retry_count": 0, "files_changed": [], "context_chars_original": 0, "context_chars_compressed": 0, "chunks_kept": 0, "chunks_compressed": 0, "chunks_dropped": 0, "scoring_latency_ms": 0, "compression_latency_ms": 0}
+      "relevant_files": [
+        "src/routes/tasks.js",
+        "src/routes/auth.js"
+      ],
+      "ignore_patterns": [
+        "node_modules"
+      ],
+      "result": {
+        "status": "queued",
+        "cost_usd": 0,
+        "turns_used": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "summary": "",
+        "error": "",
+        "retry_count": 0,
+        "files_changed": [],
+        "context_chars_original": 0,
+        "context_chars_compressed": 0,
+        "chunks_kept": 0,
+        "chunks_compressed": 0,
+        "chunks_dropped": 0,
+        "scoring_latency_ms": 0,
+        "compression_latency_ms": 0
+      }
     },
     {
       "id": "task-008",
@@ -155,17 +335,49 @@
         "cli": "claude",
         "model": "sonnet",
         "effort": "high",
-        "budget_usd": 3.00,
+        "budget_usd": 3.0,
         "max_turns": 20,
-        "permission_mode": "auto"
+        "permission_mode": "dangerously_skip"
       },
-      "depends_on": ["task-006", "task-007"],
+      "depends_on": [
+        "task-006",
+        "task-007"
+      ],
       "checkpoint": "auto",
       "on_failure": "retry_once",
       "context": "",
-      "relevant_files": ["src/routes/tasks.js", "src/routes/auth.js", "src/middleware/auth.js", "src/middleware/validate.js", "src/db.js"],
-      "ignore_patterns": ["node_modules", "src/utils/", "src/reports.js", "src/routes/reports.js"],
-      "result": {"status": "queued", "cost_usd": 0, "turns_used": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "summary": "", "error": "", "retry_count": 0, "files_changed": [], "context_chars_original": 0, "context_chars_compressed": 0, "chunks_kept": 0, "chunks_compressed": 0, "chunks_dropped": 0, "scoring_latency_ms": 0, "compression_latency_ms": 0}
+      "relevant_files": [
+        "src/routes/tasks.js",
+        "src/routes/auth.js",
+        "src/middleware/auth.js",
+        "src/middleware/validate.js",
+        "src/db.js"
+      ],
+      "ignore_patterns": [
+        "node_modules",
+        "src/utils/",
+        "src/reports.js",
+        "src/routes/reports.js"
+      ],
+      "result": {
+        "status": "queued",
+        "cost_usd": 0,
+        "turns_used": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "summary": "",
+        "error": "",
+        "retry_count": 0,
+        "files_changed": [],
+        "context_chars_original": 0,
+        "context_chars_compressed": 0,
+        "chunks_kept": 0,
+        "chunks_compressed": 0,
+        "chunks_dropped": 0,
+        "scoring_latency_ms": 0,
+        "compression_latency_ms": 0
+      }
     }
   ]
 }

@@ -218,6 +218,8 @@ def build_claude_command(task: Task, prompt: str) -> list[str]:
 
     if cfg.permission_mode == "auto":
         cmd.extend(["--permission-mode", "auto"])
+    elif cfg.permission_mode == "dangerously_skip":
+        cmd.append("--dangerously-skip-permissions")
 
     if cfg.effort:
         cmd.extend(["--effort", cfg.effort])
