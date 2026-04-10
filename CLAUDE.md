@@ -49,10 +49,16 @@ truncation.
 ### Eval Agent (`bearing eval-agent`)
 
 Tests mid-conversation compression hypothesis: full history re-sent every turn is the
-real waste, not context accumulation itself. Runs a custom tool-use agent (Anthropic API
-via urllib) with and without compression, plus a claude -p baseline. Key visualization:
-per-turn input token table showing accumulation curve flattening after compression events.
-Three conditions: `agent-raw`, `agent-compressed`, `claude-p`.
+real waste, not context accumulation itself. Runs all 8 tasks as a single mega-prompt
+agent session (same methodology as eval-compare) to ensure enough context accumulates
+(30K+ tokens) to trigger compression. Uses the Anthropic API directly via urllib with
+three tools (read_file, write_file, run_command).
+
+Three conditions: `agent-raw` (no compression, 80 turns), `agent-compressed` (API
+compression at 30K threshold, 80 turns), `claude-p` (loads cached results from
+eval-compare if available, otherwise runs fresh). Key output: per-turn input token
+table showing accumulation curve flattening after compression events. Per-task quality
+judging using the same judge infrastructure as the other evals.
 
 ## Commands
 

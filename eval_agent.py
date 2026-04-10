@@ -1,13 +1,14 @@
 """
 Bearing - Eval: Agent Compression
 
-Compares three conditions on a single task (task-001):
+Runs all 8 tasks as a single mega-prompt agent session under three conditions:
     1. agent-raw        — Our agent, no compression (baseline accumulation)
     2. agent-compressed — Our agent, API compression at 30K threshold
-    3. claude-p         — Claude Code CLI black-box comparison
+    3. claude-p         — Claude Code CLI (or cached from eval-compare results)
 
-Measures per-turn token accumulation, compression events, quality,
-and total cost. Produces eval/agent_results.md and eval/agent_results.json.
+The mega-prompt naturally accumulates 30K+ tokens as the agent builds 8 features,
+triggering compression events in the agent-compressed condition. The key output is
+a per-turn input token table showing accumulation curves and compression sawtooth.
 
 Usage:
     bearing eval-agent <project_dir>
@@ -22,6 +23,7 @@ import time
 from datetime import datetime
 
 from agent import run_agent
+from eval_compare import build_mega_prompt
 from eval_runner import (
     capture_source_files,
     extract_task_paths,
@@ -30,43 +32,35 @@ from eval_runner import (
     restore_state,
     snapshot_state,
 )
-from executor import build_claude_command, extract_cost, extract_tokens, extract_turns
-from tasks_schema import Task, TaskQueue
+from executor import extract_cost, extract_tokens, extract_turns
+from tasks_schema import TaskQueue
 
 
 CONDITIONS = ["agent-raw", "agent-compressed", "claude-p"]
 
-
-def _get_task_001(project_dir: str) -> Task:
-    """Load task-001 from tasks.json."""
-    tasks_path = os.path.join(project_dir, "tasks.json")
-    if not os.path.exists(tasks_path):
-        print(f"Error: tasks.json not found in {project_dir}")
-        sys.exit(1)
-    queue = TaskQueue.load(tasks_path)
-    for task in queue.tasks:
-        if task.id == "task-001":
-            return task
-    print("Error: task-001 not found in tasks.json")
-    sys.exit(1)
+AGENT_MAX_TURNS = 80
+COMPRESSION_THRESHOLD = 30000
+COOLDOWN_SECONDS = 90
 
 
 def _run_agent_condition(
-    task: Task,
+    mega_prompt: str,
     project_dir: str,
     condition: str,
     condition_dir: str,
 ) -> dict:
-    """Run one of the agent conditions (raw or compressed)."""
+    """Run one of the agent conditions (raw or compressed) with the mega-prompt."""
     compression_mode = "none" if condition == "agent-raw" else "api"
-    compression_threshold = 30000
 
-    print(f"\n  Running agent (compression={compression_mode})...")
+    print(
+        f"\n  Running agent (compression={compression_mode}, max_turns={AGENT_MAX_TURNS})..."
+    )
     result = run_agent(
-        task_prompt=task.prompt,
+        task_prompt=mega_prompt,
         project_dir=project_dir,
         compression_mode=compression_mode,
-        compression_threshold=compression_threshold,
+        compression_threshold=COMPRESSION_THRESHOLD,
+        max_turns=AGENT_MAX_TURNS,
     )
 
     # Capture source files
@@ -87,17 +81,72 @@ def _run_agent_condition(
     }
 
 
+def _load_claude_p_from_cache(eval_dir: str) -> dict | None:
+    """
+    Try to load claude-p results from a previous eval-compare run.
+    Returns a result dict if compare_results.json exists, None otherwise.
+    """
+    cache_path = os.path.join(eval_dir, "compare_results.json")
+    if not os.path.exists(cache_path):
+        return None
+
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    single = data.get("single_session")
+    if not single:
+        return None
+
+    print("  Loaded claude-p results from eval/compare_results.json (cached)")
+    return {
+        "condition": "claude-p",
+        "status": "completed" if single.get("completed", 0) > 0 else "error",
+        "total_input_tokens": single.get("total_input_tokens", 0),
+        "total_output_tokens": single.get("total_output_tokens", 0),
+        "turns_used": single.get("total_turns", 0),
+        "per_turn_input_tokens": [],
+        "per_turn_output_tokens": [],
+        "compressions": [],
+        "cost_usd": round(single.get("total_cost", 0), 4),
+        "wall_time_s": round(single.get("wall_time_s", 0), 1),
+        "summary": "(cached from eval-compare)",
+    }
+
+
 def _run_claude_p_condition(
-    task: Task,
+    mega_prompt: str,
+    queue: TaskQueue,
     project_dir: str,
     condition_dir: str,
 ) -> dict:
-    """Run claude -p as the black-box comparison."""
-    print("\n  Running claude -p...")
+    """Run claude -p with the mega-prompt, same as eval_compare's single session."""
+    print("\n  Running claude -p with mega-prompt...")
 
-    cmd = build_claude_command(task, task.prompt)
+    total_budget = sum(t.config.budget_usd for t in queue.tasks)
+
+    cmd = [
+        "claude",
+        "-p",
+        mega_prompt,
+        "--model",
+        "sonnet",
+        "--output-format",
+        "json",
+        "--max-budget-usd",
+        str(total_budget),
+        "--max-turns",
+        "100",
+        "--dangerously-skip-permissions",
+        "--effort",
+        "high",
+    ]
+
+    print(f"  Mega-prompt: {len(mega_prompt)} chars, budget: ${total_budget:.2f}")
+
     t0 = time.time()
-
     try:
         result = subprocess.run(
             cmd,
@@ -106,7 +155,7 @@ def _run_claude_p_condition(
             encoding="utf-8",
             errors="replace",
             cwd=project_dir,
-            timeout=1800,
+            timeout=3600,
         )
     except subprocess.TimeoutExpired:
         capture_source_files(project_dir, condition_dir)
@@ -120,7 +169,7 @@ def _run_claude_p_condition(
             "per_turn_output_tokens": [],
             "compressions": [],
             "cost_usd": 0.0,
-            "wall_time_s": 1800.0,
+            "wall_time_s": 3600.0,
             "summary": "Timed out",
         }
 
@@ -162,20 +211,23 @@ def _run_claude_p_condition(
 
 def _run_judges(
     eval_dir: str,
-    task: Task,
+    queue: TaskQueue,
     all_results: list[dict],
 ) -> dict:
-    """Run quality judgments on all conditions."""
+    """
+    Run per-task quality judgments on all conditions.
+    Each task is judged individually against source files produced.
+    """
     import tempfile
 
     temp_dir = tempfile.mkdtemp(prefix="bearing_agent_judge_")
 
     print(f"\n{'=' * 60}")
     print("  Running quality judgments (Claude Sonnet)")
+    print(f"  Judging {len(queue.tasks)} tasks per condition")
     print(f"{'=' * 60}\n")
 
     judgments = {}
-    task_paths = extract_task_paths(task)
 
     for cond_result in all_results:
         condition = cond_result["condition"]
@@ -184,12 +236,18 @@ def _run_judges(
         if not os.path.exists(condition_dir):
             continue
 
-        source_files = read_source_files(condition_dir, filter_paths=task_paths)
+        cond_scores = []
+        for task in queue.tasks:
+            task_paths = extract_task_paths(task)
+            source_files = read_source_files(condition_dir, filter_paths=task_paths)
 
-        print(f"  Judging: {condition}...")
-        scores = judge_task(task.prompt, source_files, temp_dir)
-        scores["condition"] = condition
-        judgments[condition] = scores
+            print(f"  Judging: {condition} / {task.id}...")
+            scores = judge_task(task.prompt, source_files, temp_dir)
+            scores["id"] = task.id
+            scores["name"] = task.name
+            cond_scores.append(scores)
+
+        judgments[condition] = cond_scores
 
     shutil.rmtree(temp_dir, ignore_errors=True)
     return judgments
@@ -199,6 +257,7 @@ def _write_report(
     eval_dir: str,
     all_results: list[dict],
     judgments: dict,
+    queue: TaskQueue,
 ):
     """Write agent_results.md and agent_results.json."""
     # --- JSON ---
@@ -214,6 +273,8 @@ def _write_report(
     lines = [
         "# Agent Compression Eval Results",
         f"_Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_",
+        "",
+        f"All {len(queue.tasks)} tasks run as a single mega-prompt agent session.",
         "",
         "## Summary",
         "",
@@ -243,16 +304,17 @@ def _write_report(
         lines.append(row)
 
     # Token efficiency ratio
-    lines.append("| Input/Output ratio |")
+    row = "| Input/Output ratio |"
     for cond in CONDITIONS:
         for r in all_results:
             if r["condition"] == cond:
                 out = r["total_output_tokens"]
                 ratio = r["total_input_tokens"] / out if out > 0 else 0
-                lines[-1] = lines[-1] + f" {ratio:.1f} |"
+                row += f" {ratio:.1f} |"
                 break
         else:
-            lines[-1] = lines[-1] + " - |"
+            row += " - |"
+    lines.append(row)
 
     lines.extend(["", ""])
 
@@ -278,10 +340,10 @@ def _write_report(
         )
 
         # Build compression turn set for notes
-        comp_turns = set()
+        comp_turns = {}
         if comp_result:
             for c in comp_result.get("compressions", []):
-                comp_turns.add(c["turn"])
+                comp_turns[c["turn"]] = c
 
         for i in range(max_turns):
             raw_val = "-"
@@ -294,7 +356,11 @@ def _write_report(
                 comp_val = f"{comp_result['per_turn_input_tokens'][i]:,}"
 
             if (i + 1) in comp_turns:
-                note = "compressed"
+                c = comp_turns[i + 1]
+                note = (
+                    f"compressed {c['tokens_before']:,} -> "
+                    f"~{c['tokens_after']:,} tokens"
+                )
 
             lines.append(f"| {i + 1} | {raw_val} | {comp_val} | {note} |")
 
@@ -321,11 +387,59 @@ def _write_report(
             )
         lines.extend(["", ""])
 
-    # --- Quality scores ---
+    # --- Per-task quality scores ---
     if judgments:
         lines.extend(
             [
                 "## Quality Scores (1-5, higher is better)",
+                "",
+            ]
+        )
+
+        # Per-task table
+        for cond in CONDITIONS:
+            cond_scores = judgments.get(cond, [])
+            if not cond_scores:
+                continue
+
+            lines.extend(
+                [
+                    f"### {cond}",
+                    "",
+                    "| Task | Completeness | Correctness | Adherence | Notes |",
+                    "|------|-------------|------------|-----------|-------|",
+                ]
+            )
+            for s in cond_scores:
+                task_id = s.get("id", "?")
+                c = s.get("completeness", 0)
+                cr = s.get("correctness", 0)
+                a = s.get("adherence", 0)
+                note = s.get("notes", "")[:100]
+                lines.append(f"| {task_id} | {c} | {cr} | {a} | {note} |")
+
+            # Averages
+            if cond_scores:
+                avg_c = sum(s.get("completeness", 0) for s in cond_scores) / len(
+                    cond_scores
+                )
+                avg_cr = sum(s.get("correctness", 0) for s in cond_scores) / len(
+                    cond_scores
+                )
+                avg_a = sum(s.get("adherence", 0) for s in cond_scores) / len(
+                    cond_scores
+                )
+                lines.append(
+                    f"| **Average** | **{avg_c:.1f}** | **{avg_cr:.1f}** | "
+                    f"**{avg_a:.1f}** | |"
+                )
+
+            lines.extend(["", ""])
+
+        # Cross-condition summary
+        lines.extend(
+            [
+                "### Summary Across Conditions",
                 "",
                 "| Dimension | agent-raw | agent-compressed | claude-p |",
                 "|-----------|-----------|-----------------|----------|",
@@ -334,15 +448,15 @@ def _write_report(
         for dim in ["completeness", "correctness", "adherence"]:
             row = f"| {dim.title()} |"
             for cond in CONDITIONS:
-                score = judgments.get(cond, {}).get(dim, 0)
-                row += f" {score} |"
+                cond_scores = judgments.get(cond, [])
+                if cond_scores:
+                    vals = [s.get(dim, 0) for s in cond_scores if s.get(dim, 0) > 0]
+                    avg = sum(vals) / len(vals) if vals else 0
+                    row += f" {avg:.1f} |"
+                else:
+                    row += " - |"
             lines.append(row)
 
-        lines.extend(["", "### Judge Notes", ""])
-        for cond in CONDITIONS:
-            note = judgments.get(cond, {}).get("notes", "")
-            if note:
-                lines.append(f"- **{cond}**: {note[:300]}")
         lines.extend(["", ""])
 
     # --- Interpretation ---
@@ -365,6 +479,10 @@ def _write_report(
             "black box — we can't see per-turn tokens, only the total. The comparison",
             "shows whether our explicit compression beats Claude's built-in approach.",
             "",
+            "**Mega-prompt:** All 8 tasks are run as a single agent session to ensure",
+            "enough context accumulates (30K+ tokens) to trigger compression. This",
+            "matches the eval-compare methodology for fair comparison.",
+            "",
         ]
     )
 
@@ -374,7 +492,7 @@ def _write_report(
 
 def run_eval_agent(project_dir: str):
     """
-    Run the agent compression eval: 3 conditions on task-001.
+    Run the agent compression eval: 3 conditions, all tasks as mega-prompt.
     """
     project_dir = os.path.abspath(project_dir)
     eval_dir = os.path.join(project_dir, "eval")
@@ -403,12 +521,15 @@ def run_eval_agent(project_dir: str):
         print("The eval runner resets the codebase between conditions.")
         sys.exit(1)
 
-    task = _get_task_001(project_dir)
+    queue = TaskQueue.load(tasks_path)
+    mega_prompt = build_mega_prompt(queue)
 
     print("Bearing Agent Compression Eval")
     print(f"Project: {project_dir}")
-    print(f"Task: {task.id} — {task.name}")
+    print(f"Tasks: {len(queue.tasks)} (mega-prompt, {len(mega_prompt)} chars)")
     print(f"Conditions: {', '.join(CONDITIONS)}")
+    print(f"Agent max turns: {AGENT_MAX_TURNS}")
+    print(f"Compression threshold: {COMPRESSION_THRESHOLD:,} tokens")
     print()
 
     snapshot_state(project_dir, eval_dir)
@@ -417,8 +538,11 @@ def run_eval_agent(project_dir: str):
 
     for cond_idx, condition in enumerate(CONDITIONS):
         if cond_idx > 0:
-            print("\n  Waiting 60s between conditions (rate limit cooldown)...")
-            time.sleep(60)
+            print(
+                f"\n  Waiting {COOLDOWN_SECONDS}s between conditions "
+                f"(rate limit cooldown)..."
+            )
+            time.sleep(COOLDOWN_SECONDS)
 
         condition_dir = os.path.join(eval_dir, condition)
         os.makedirs(condition_dir, exist_ok=True)
@@ -432,10 +556,15 @@ def run_eval_agent(project_dir: str):
 
         if condition in ("agent-raw", "agent-compressed"):
             cond_result = _run_agent_condition(
-                task, project_dir, condition, condition_dir
+                mega_prompt, project_dir, condition, condition_dir
             )
-        else:
-            cond_result = _run_claude_p_condition(task, project_dir, condition_dir)
+        elif condition == "claude-p":
+            # Try cached results from eval-compare first
+            cond_result = _load_claude_p_from_cache(eval_dir)
+            if cond_result is None:
+                cond_result = _run_claude_p_condition(
+                    mega_prompt, queue, project_dir, condition_dir
+                )
 
         print(
             f"\n  Result: {cond_result['status']} | "
@@ -456,11 +585,11 @@ def run_eval_agent(project_dir: str):
     # Restore clean state
     restore_state(project_dir, eval_dir)
 
-    # Judge all conditions
-    judgments = _run_judges(eval_dir, task, all_results)
+    # Judge all conditions (per-task)
+    judgments = _run_judges(eval_dir, queue, all_results)
 
     # Write report
-    _write_report(eval_dir, all_results, judgments)
+    _write_report(eval_dir, all_results, judgments, queue)
 
     print(f"\n{'=' * 60}")
     print("  Agent compression eval complete")
