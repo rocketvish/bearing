@@ -28,7 +28,9 @@
       "Bash(.venv/Scripts/python.exe -c \"from agent import run_agent; print\\('agent.py: OK'\\)\")",
       "Bash(.venv/Scripts/python.exe -c \"from compressor import compress_history; print\\('compressor.py: OK'\\)\")",
       "Bash(.venv/Scripts/python.exe -c \"from eval_agent import run_eval_agent; print\\('eval_agent.py: OK'\\)\")",
-      "Bash(.venv/Scripts/python.exe -m bearing)"
+      "Bash(.venv/Scripts/python.exe -m bearing)",
+      "Bash(xxd \"C:/Users/Rocketfish/projects/bearing-benchmark/.env\")",
+      "Bash(.venv/Scripts/python.exe -c ':*)"
     ]
   }
 }

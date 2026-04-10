@@ -104,8 +104,8 @@ def load_api_key(project_dir: str = ".") -> str | None:
 
     env_path = os.path.join(project_dir, ".env")
     if os.path.exists(env_path):
-        # Try UTF-8 first, fall back to UTF-16 (PowerShell writes UTF-16 with BOM)
-        for encoding in ("utf-8", "utf-16"):
+        # utf-8-sig strips BOM from PowerShell's "UTF8" encoding; fall back to UTF-16
+        for encoding in ("utf-8-sig", "utf-16"):
             try:
                 with open(env_path, "r", encoding=encoding) as f:
                     for line in f:
@@ -126,6 +126,9 @@ def load_api_key(project_dir: str = ".") -> str | None:
                 continue
             except OSError:
                 break
+        print(f"Warning: .env file found at {env_path} but no ANTHROPIC_API_KEY in it")
+    else:
+        print(f"Note: No .env file at {env_path}")
 
     return None
 
