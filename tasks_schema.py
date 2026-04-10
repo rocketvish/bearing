@@ -22,9 +22,10 @@ class TaskStatus(str, Enum):
 
 class CheckpointLevel(str, Enum):
     """Controls when the orchestrator pauses for human review."""
-    AUTO = "auto"              # Continue automatically on success
-    NOTIFY = "notify"          # Log prominently but continue
-    PAUSE = "pause"            # Stop and wait for human to resume
+
+    AUTO = "auto"  # Continue automatically on success
+    NOTIFY = "notify"  # Log prominently but continue
+    PAUSE = "pause"  # Stop and wait for human to resume
 
 
 class FailurePolicy(str, Enum):
@@ -36,36 +37,38 @@ class FailurePolicy(str, Enum):
 @dataclass
 class ExecutionConfig:
     """Per-task execution configuration."""
-    cli: str = "claude"           # claude | codex | custom command
+
+    cli: str = "claude"  # claude | codex | custom command
     model: str = "sonnet"
-    effort: str = "high"          # low | medium | high | max
-    budget_usd: float = 3.00      # token ceiling (works on subscriptions too)
+    effort: str = "high"  # low | medium | high | max
+    budget_usd: float = 3.00  # token ceiling (works on subscriptions too)
     max_turns: int = 20
     permission_mode: str = "auto"  # auto | default | dangerously_skip (claude only)
-    worktree: Optional[str] = None # git worktree name, None = use current branch
+    worktree: Optional[str] = None  # git worktree name, None = use current branch
     fast_mode: bool = False
 
 
 @dataclass
 class TaskResult:
     """What comes back from a CLI execution."""
+
     status: TaskStatus = TaskStatus.QUEUED
     cost_usd: float = 0.0
     turns_used: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
-    cache_read_tokens: int = 0     # cheap reads (0.1x cost) — subset of input_tokens
+    cache_read_tokens: int = 0  # cheap reads (0.1x cost) — subset of input_tokens
     summary: str = ""
     error: str = ""
     retry_count: int = 0
     files_changed: list[str] = field(default_factory=list)  # for context propagation
-    context_chars_original: int = 0    # prose context size before compression
+    context_chars_original: int = 0  # prose context size before compression
     context_chars_compressed: int = 0  # context size after compression
-    chunks_kept: int = 0               # chunks above keep threshold
-    chunks_compressed: int = 0         # chunks between thresholds (mid-tier)
-    chunks_dropped: int = 0            # chunks below drop threshold
-    scoring_latency_ms: int = 0        # embedding scoring time
-    compression_latency_ms: int = 0    # LLM compression time
+    chunks_kept: int = 0  # chunks above keep threshold
+    chunks_compressed: int = 0  # chunks between thresholds (mid-tier)
+    chunks_dropped: int = 0  # chunks below drop threshold
+    scoring_latency_ms: int = 0  # embedding scoring time
+    compression_latency_ms: int = 0  # LLM compression time
 
     @property
     def total_tokens(self) -> int:
@@ -80,6 +83,7 @@ class TaskResult:
 @dataclass
 class Task:
     """A single unit of work for a CLI agent to execute."""
+
     id: str
     name: str
     prompt: str
@@ -87,8 +91,8 @@ class Task:
     depends_on: list[str] = field(default_factory=list)
     checkpoint: CheckpointLevel = CheckpointLevel.AUTO
     on_failure: FailurePolicy = FailurePolicy.PAUSE
-    context: str = ""               # Relevant info from previous tasks
-    relevant_files: list[str] = field(default_factory=list)   # Files to focus on
+    context: str = ""  # Relevant info from previous tasks
+    relevant_files: list[str] = field(default_factory=list)  # Files to focus on
     ignore_patterns: list[str] = field(default_factory=list)  # Files/dirs to skip
     result: TaskResult = field(default_factory=TaskResult)
 
@@ -105,14 +109,20 @@ class Task:
     def from_dict(cls, d: dict) -> "Task":
         config_data = d.get("config", {})
         # Filter out unknown fields for forward compatibility
-        valid_config_fields = {f.name for f in ExecutionConfig.__dataclass_fields__.values()}
-        config = ExecutionConfig(**{k: v for k, v in config_data.items() if k in valid_config_fields})
+        valid_config_fields = {
+            f.name for f in ExecutionConfig.__dataclass_fields__.values()
+        }
+        config = ExecutionConfig(
+            **{k: v for k, v in config_data.items() if k in valid_config_fields}
+        )
 
         result_data = d.get("result", {})
         result_data["status"] = TaskStatus(result_data.get("status", "queued"))
         # Filter out unknown fields for forward compatibility
         valid_result_fields = {f.name for f in TaskResult.__dataclass_fields__.values()}
-        result = TaskResult(**{k: v for k, v in result_data.items() if k in valid_result_fields})
+        result = TaskResult(
+            **{k: v for k, v in result_data.items() if k in valid_result_fields}
+        )
 
         return cls(
             id=d["id"],
@@ -132,11 +142,14 @@ class Task:
 @dataclass
 class TaskQueue:
     """The full task file. Contains project info + ordered task list."""
+
     project: str
     description: str = ""
-    context_format: str = "structured"  # "structured" | "prose" | "embedding" | "embedding+llm"
-    relevance_threshold_keep: float = 0.6    # above this: keep chunk verbatim
-    relevance_threshold_drop: float = 0.35   # below this: drop chunk entirely
+    context_format: str = (
+        "structured"  # "structured" | "prose" | "embedding" | "embedding+llm"
+    )
+    relevance_threshold_keep: float = 0.75  # above this: keep chunk verbatim
+    relevance_threshold_drop: float = 0.55  # below this: drop chunk entirely
     embedding_model: str = "nomic-embed-text"
     compression_model: str = "gemma4:26b"
     tasks: list[Task] = field(default_factory=list)
@@ -182,7 +195,8 @@ class TaskQueue:
     def next_task(self) -> Optional[Task]:
         """Returns the next queued task whose dependencies are met."""
         resolved_ids = {
-            t.id for t in self.tasks
+            t.id
+            for t in self.tasks
             if t.result.status in (TaskStatus.COMPLETED, TaskStatus.SKIPPED)
         }
         for task in self.tasks:
@@ -194,11 +208,7 @@ class TaskQueue:
         return None
 
     def has_failures(self) -> bool:
-        return any(
-            t.result.status == TaskStatus.FAILED for t in self.tasks
-        )
+        return any(t.result.status == TaskStatus.FAILED for t in self.tasks)
 
     def is_paused(self) -> bool:
-        return any(
-            t.result.status == TaskStatus.AWAITING_REVIEW for t in self.tasks
-        )
+        return any(t.result.status == TaskStatus.AWAITING_REVIEW for t in self.tasks)

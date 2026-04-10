@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ruff check:*)",
+      "Bash(pip show:*)",
+      "Bash(pip install:*)",
+      "Bash(where python:*)",
+      "Bash(python3:*)",
+      "Bash(where.exe python:*)",
+      "Bash(where.exe ruff:*)",
+      "Read(//c/Users/Rocketfish/AppData/Local/Programs/**)",
+      "Bash(ls /c/Python*/python.exe)",
+      "Bash(cmd.exe:*)",
+      "Bash(powershell.exe:*)",
+      "Read(//c/Users/Rocketfish/.local/bin/**)",
+      "Read(//c/Users/Rocketfish/AppData/Roaming/**)",
+      "Read(//c/Users/Rocketfish/scoop/**)",
+      "Read(//c/Users/Rocketfish/.cargo/**)",
+      "Bash(/c/Users/Rocketfish/.local/bin/python3.12.exe:*)",
+      "Bash(ls /c/Users/Rocketfish/.local/bin/uv*)",
+      "Bash(/c/Users/Rocketfish/.local/bin/uv tool:*)",
+      "Bash(/c/Users/Rocketfish/.local/bin/uvx ruff:*)",
+      "Bash(uv tool:*)",
+      "Bash(python:*)",
+      "Bash(uv run:*)",
+      "Bash(.venv/Scripts/python.exe -m ruff check agent.py compressor.py eval_agent.py bearing.py)",
+      "Bash(where ruff:*)",
+      "Bash(.venv/Scripts/python.exe -c \"from agent import run_agent; print\\('agent.py: OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"from compressor import compress_history; print\\('compressor.py: OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"from eval_agent import run_eval_agent; print\\('eval_agent.py: OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -m bearing)"
+    ]
+  }
+}

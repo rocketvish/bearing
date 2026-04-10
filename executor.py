@@ -20,6 +20,7 @@ from tasks_schema import Task, TaskResult, TaskStatus
 
 # --- Context Compression ---
 
+
 def parse_context_entries(context_text: str) -> list[dict]:
     """
     Parse prose context entries into structured dicts.
@@ -56,12 +57,14 @@ def parse_context_entries(context_text: str) -> list[dict]:
                 if files_str
                 else []
             )
-            entries.append({
-                "id": task_id,
-                "name": name,
-                "files": files,
-                "did": summary,
-            })
+            entries.append(
+                {
+                    "id": task_id,
+                    "name": name,
+                    "files": files,
+                    "did": summary,
+                }
+            )
         else:
             # Unparseable line — keep as raw text
             entries.append({"id": "?", "name": "", "files": [], "did": line})
@@ -95,10 +98,15 @@ def compress_context(context_text: str) -> str:
 
 # --- Prompt Assembly ---
 
-def assemble_prompt(task: Task, context_format: str = "structured",
-                    threshold_keep: float = 0.6, threshold_drop: float = 0.35,
-                    embedding_model: str = "nomic-embed-text",
-                    compression_model: str = "gemma4:26b") -> tuple[str, dict]:
+
+def assemble_prompt(
+    task: Task,
+    context_format: str = "structured",
+    threshold_keep: float = 0.6,
+    threshold_drop: float = 0.35,
+    embedding_model: str = "nomic-embed-text",
+    compression_model: str = "gemma4:26b",
+) -> tuple[str, dict]:
     """
     Build the full prompt from task fields.
 
@@ -136,9 +144,13 @@ def assemble_prompt(task: Task, context_format: str = "structured",
         if use_compact_directives:
             focus_lines = []
             if task.relevant_files:
-                focus_lines.append("FOCUS:" + json.dumps(task.relevant_files, separators=(",", ":")))
+                focus_lines.append(
+                    "FOCUS:" + json.dumps(task.relevant_files, separators=(",", ":"))
+                )
             if task.ignore_patterns:
-                focus_lines.append("SKIP:" + json.dumps(task.ignore_patterns, separators=(",", ":")))
+                focus_lines.append(
+                    "SKIP:" + json.dumps(task.ignore_patterns, separators=(",", ":"))
+                )
             parts.append("\n".join(focus_lines))
         else:
             focus_lines = []
@@ -149,9 +161,7 @@ def assemble_prompt(task: Task, context_format: str = "structured",
                 )
             if task.ignore_patterns:
                 skip_list = ", ".join(task.ignore_patterns)
-                focus_lines.append(
-                    f"SKIP: Do not read or modify these: {skip_list}"
-                )
+                focus_lines.append(f"SKIP: Do not read or modify these: {skip_list}")
             parts.append("\n".join(focus_lines))
 
     # Context from completed dependencies
@@ -170,7 +180,11 @@ def assemble_prompt(task: Task, context_format: str = "structured",
             from relevance import score_and_compress
 
             # Split context into per-task chunks
-            chunks = [line.strip() for line in task.context.strip().split("\n") if line.strip()]
+            chunks = [
+                line.strip()
+                for line in task.context.strip().split("\n")
+                if line.strip()
+            ]
 
             scored_chunks, rel_metrics = score_and_compress(
                 context_chunks=chunks,
@@ -204,16 +218,22 @@ def assemble_prompt(task: Task, context_format: str = "structured",
 
 # --- CLI Command Builders ---
 
+
 def build_claude_command(task: Task, prompt: str) -> list[str]:
     """Build a `claude -p` command with full flag support."""
     cfg = task.config
     cmd = [
         "claude",
-        "-p", prompt,
-        "--model", cfg.model,
-        "--output-format", "json",
-        "--max-budget-usd", str(cfg.budget_usd),
-        "--max-turns", str(cfg.max_turns),
+        "-p",
+        prompt,
+        "--model",
+        cfg.model,
+        "--output-format",
+        "json",
+        "--max-budget-usd",
+        str(cfg.budget_usd),
+        "--max-turns",
+        str(cfg.max_turns),
     ]
 
     if cfg.permission_mode == "auto":
@@ -234,7 +254,8 @@ def build_codex_command(task: Task, prompt: str) -> list[str]:
     """Build a `codex exec` command for non-interactive mode."""
     cfg = task.config
     cmd = [
-        "codex", "exec",
+        "codex",
+        "exec",
         "--json",
         prompt,
     ]
@@ -268,6 +289,7 @@ def check_cli_installed(cli: str = "claude") -> bool:
 
 
 # --- Output Parsing ---
+
 
 def parse_claude_output(raw_output: str) -> dict:
     """Parse Claude Code's JSON output."""
@@ -323,6 +345,7 @@ def parse_output(raw_output: str, cli: str) -> dict:
 
 
 # --- Field Extractors (Claude format, verified) ---
+
 
 def extract_cost(data: dict) -> float:
     """Extract cost. Verified field: total_cost_usd (top-level)."""
@@ -433,8 +456,10 @@ def parse_result(parsed: dict, default_status: TaskStatus) -> TaskResult:
 
 # --- Task Runner ---
 
-def run_task(task: Task, project_dir: str, prompt: str = None,
-             context_format: str = "structured") -> tuple[TaskResult, dict]:
+
+def run_task(
+    task: Task, project_dir: str, prompt: str = None, context_format: str = "structured"
+) -> tuple[TaskResult, dict]:
     """
     Execute a single task via the configured CLI.
 
@@ -444,7 +469,11 @@ def run_task(task: Task, project_dir: str, prompt: str = None,
     if prompt is None:
         prompt, metrics = assemble_prompt(task, context_format)
     else:
-        metrics = {"context_original": 0, "context_compressed": 0, "format": context_format}
+        metrics = {
+            "context_original": 0,
+            "context_compressed": 0,
+            "format": context_format,
+        }
 
     cmd = build_command(task, prompt)
     cli = task.config.cli.lower()
@@ -462,7 +491,8 @@ def run_task(task: Task, project_dir: str, prompt: str = None,
             parsed = parse_output(result.stdout, cli)
             if isinstance(parsed, dict) and ("type" in parsed or "result" in parsed):
                 default_status = (
-                    TaskStatus.COMPLETED if result.returncode == 0
+                    TaskStatus.COMPLETED
+                    if result.returncode == 0
                     else TaskStatus.FAILED
                 )
                 return parse_result(parsed, default_status), metrics

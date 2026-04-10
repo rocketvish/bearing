@@ -22,6 +22,7 @@ Requires:
 """
 
 import os
+import re
 import sys
 import json
 import shutil
@@ -51,10 +52,12 @@ def restore_state(project_dir: str, eval_dir: str):
     shutil.copy2(snapshot_path, tasks_path)
 
     # Reset codebase to clean state
-    subprocess.run(["git", "checkout", "."], cwd=project_dir,
-                   capture_output=True, check=True)
-    subprocess.run(["git", "clean", "-fd"], cwd=project_dir,
-                   capture_output=True, check=True)
+    subprocess.run(
+        ["git", "checkout", "."], cwd=project_dir, capture_output=True, check=True
+    )
+    subprocess.run(
+        ["git", "clean", "-fd"], cwd=project_dir, capture_output=True, check=True
+    )
 
     # Remove debug/ and status.md from previous condition
     debug_dir = os.path.join(project_dir, "debug")
@@ -87,12 +90,35 @@ def capture_source_files(project_dir: str, condition_dir: str):
             )
 
 
-def read_source_files(condition_dir: str) -> str:
+def extract_task_paths(task) -> list[str]:
     """
-    Read all source files from a condition directory into a single string.
+    Extract file paths relevant to a task from its prompt and relevant_files.
+    Used to filter source files for per-task judge evaluation.
+    """
+    paths = set()
+
+    # Paths explicitly mentioned in the task prompt (src/... patterns)
+    for match in re.findall(r"src/[\w/.-]+\.(?:js|ts|json|md)", task.prompt):
+        paths.add(match)
+
+    # Paths from relevant_files
+    for f in task.relevant_files:
+        paths.add(f)
+
+    return sorted(paths)
+
+
+def read_source_files(condition_dir: str, filter_paths: list[str] = None) -> str:
+    """
+    Read source files from a condition directory into a single string.
     Used to give the judge the actual code that was produced.
+
+    If filter_paths is provided, prioritize those files first, then include
+    remaining files. This ensures the judge sees task-relevant files before
+    any truncation occurs.
     """
-    parts = []
+    priority_parts = []
+    other_parts = []
 
     src_dir = os.path.join(condition_dir, "src")
     if os.path.exists(src_dir):
@@ -100,28 +126,41 @@ def read_source_files(condition_dir: str) -> str:
             for fname in sorted(files):
                 filepath = os.path.join(root, fname)
                 relpath = os.path.relpath(filepath, condition_dir)
+                # Normalize to forward slashes for matching
+                relpath_normalized = relpath.replace("\\", "/")
                 try:
                     with open(filepath, "r", encoding="utf-8") as f:
                         content = f.read()
-                    parts.append(f"=== {relpath} ===\n{content}")
+                    entry = f"=== {relpath_normalized} ===\n{content}"
                 except Exception:
-                    parts.append(f"=== {relpath} ===\n[could not read]")
+                    entry = f"=== {relpath_normalized} ===\n[could not read]"
+
+                if filter_paths and relpath_normalized in filter_paths:
+                    priority_parts.append(entry)
+                else:
+                    other_parts.append(entry)
 
     # Read any .md files in condition root (API.md, etc.)
     for fname in sorted(os.listdir(condition_dir)):
         fpath = os.path.join(condition_dir, fname)
-        if fname.endswith(".md") and fname not in ("status.md", "results.md") and os.path.isfile(fpath):
+        if (
+            fname.endswith(".md")
+            and fname not in ("status.md", "results.md")
+            and os.path.isfile(fpath)
+        ):
             try:
                 with open(fpath, "r", encoding="utf-8") as f:
                     content = f.read()
-                parts.append(f"=== {fname} ===\n{content}")
+                other_parts.append(f"=== {fname} ===\n{content}")
             except Exception:
                 pass
 
-    if not parts:
+    # Priority files first, then the rest
+    all_parts = priority_parts + other_parts
+    if not all_parts:
         return "No source files found."
 
-    return "\n\n".join(parts)
+    return "\n\n".join(all_parts)
 
 
 def run_condition(project_dir: str, condition: str, eval_dir: str) -> dict:
@@ -132,14 +171,19 @@ def run_condition(project_dir: str, condition: str, eval_dir: str) -> dict:
     condition_dir = os.path.join(eval_dir, condition.replace("+", "_"))
     os.makedirs(condition_dir, exist_ok=True)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  Condition: {condition}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     t0 = time.time()
     cmd = [
-        sys.executable, "-m", "bearing", "run", project_dir,
-        "--format", condition,
+        sys.executable,
+        "-m",
+        "bearing",
+        "run",
+        project_dir,
+        "--format",
+        condition,
     ]
     result = subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True)
     wall_time = time.time() - t0
@@ -172,23 +216,25 @@ def run_condition(project_dir: str, condition: str, eval_dir: str) -> dict:
     task_metrics = []
     for task in queue.tasks:
         r = task.result
-        task_metrics.append({
-            "id": task.id,
-            "name": task.name,
-            "status": r.status.value,
-            "cost_usd": r.cost_usd,
-            "input_tokens": r.input_tokens,
-            "output_tokens": r.output_tokens,
-            "cache_read_tokens": r.cache_read_tokens,
-            "turns_used": r.turns_used,
-            "context_chars_original": r.context_chars_original,
-            "context_chars_compressed": r.context_chars_compressed,
-            "chunks_kept": r.chunks_kept,
-            "chunks_compressed": r.chunks_compressed,
-            "chunks_dropped": r.chunks_dropped,
-            "scoring_latency_ms": r.scoring_latency_ms,
-            "compression_latency_ms": r.compression_latency_ms,
-        })
+        task_metrics.append(
+            {
+                "id": task.id,
+                "name": task.name,
+                "status": r.status.value,
+                "cost_usd": r.cost_usd,
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                "cache_read_tokens": r.cache_read_tokens,
+                "turns_used": r.turns_used,
+                "context_chars_original": r.context_chars_original,
+                "context_chars_compressed": r.context_chars_compressed,
+                "chunks_kept": r.chunks_kept,
+                "chunks_compressed": r.chunks_compressed,
+                "chunks_dropped": r.chunks_dropped,
+                "scoring_latency_ms": r.scoring_latency_ms,
+                "compression_latency_ms": r.compression_latency_ms,
+            }
+        )
 
     completed = sum(1 for t in queue.tasks if t.result.status in DONE_STATUSES)
     failed = sum(1 for t in queue.tasks if t.result.status == TaskStatus.FAILED)
@@ -211,8 +257,8 @@ def judge_task(task_prompt: str, source_files: str, temp_dir: str) -> dict:
     Use claude -p to judge task output quality by examining actual source files.
     Returns scores dict.
     """
-    if len(source_files) > 6000:
-        source_files = source_files[:6000] + "\n\n[... truncated for length ...]"
+    if len(source_files) > 15000:
+        source_files = source_files[:15000] + "\n\n[... truncated for length ...]"
 
     judge_prompt = (
         "You are evaluating whether an AI coding agent completed a task correctly. "
@@ -235,7 +281,15 @@ def judge_task(task_prompt: str, source_files: str, temp_dir: str) -> dict:
 
     try:
         result = subprocess.run(
-            ["claude", "-p", judge_prompt, "--model", "sonnet", "--output-format", "json"],
+            [
+                "claude",
+                "-p",
+                judge_prompt,
+                "--model",
+                "sonnet",
+                "--output-format",
+                "json",
+            ],
             cwd=temp_dir,
             capture_output=True,
             text=True,
@@ -260,10 +314,19 @@ def judge_task(task_prompt: str, source_files: str, temp_dir: str) -> dict:
                         scores[key] = max(1, min(5, int(scores[key])))
                 return scores
     except Exception as e:
-        return {"completeness": 0, "correctness": 0, "adherence": 0,
-                "notes": f"judge parse failed: {str(e)[:100]}"}
+        return {
+            "completeness": 0,
+            "correctness": 0,
+            "adherence": 0,
+            "notes": f"judge parse failed: {str(e)[:100]}",
+        }
 
-    return {"completeness": 0, "correctness": 0, "adherence": 0, "notes": "judge failed"}
+    return {
+        "completeness": 0,
+        "correctness": 0,
+        "adherence": 0,
+        "notes": "judge failed",
+    }
 
 
 def run_judges(eval_dir: str, all_results: list[dict]) -> dict:
@@ -272,12 +335,13 @@ def run_judges(eval_dir: str, all_results: list[dict]) -> dict:
     Reads actual source files from each condition directory.
     """
     import tempfile
+
     temp_dir = tempfile.mkdtemp(prefix="bearing_judge_")
 
-    print(f"\n{'='*60}")
-    print(f"  Running quality judgments (Claude Sonnet)")
-    print(f"  Judge evaluates actual source files, not session summaries")
-    print(f"{'='*60}\n")
+    print(f"\n{'=' * 60}")
+    print("  Running quality judgments (Claude Sonnet)")
+    print("  Judge evaluates actual source files, not session summaries")
+    print(f"{'=' * 60}\n")
 
     judgments = {}
     for cond_result in all_results:
@@ -289,20 +353,25 @@ def run_judges(eval_dir: str, all_results: list[dict]) -> dict:
             continue
 
         queue = TaskQueue.load(tasks_path)
-        source_files = read_source_files(condition_dir)
         cond_scores = []
 
         for task in queue.tasks:
             if task.result.status not in DONE_STATUSES:
-                cond_scores.append({
-                    "id": task.id,
-                    "status": task.result.status.value,
-                    "completeness": 0,
-                    "correctness": 0,
-                    "adherence": 0,
-                    "notes": f"task status: {task.result.status.value}",
-                })
+                cond_scores.append(
+                    {
+                        "id": task.id,
+                        "status": task.result.status.value,
+                        "completeness": 0,
+                        "correctness": 0,
+                        "adherence": 0,
+                        "notes": f"task status: {task.result.status.value}",
+                    }
+                )
                 continue
+
+            # Filter source files to prioritize task-relevant paths
+            task_paths = extract_task_paths(task)
+            source_files = read_source_files(condition_dir, filter_paths=task_paths)
 
             print(f"  Judging: {condition} / {task.id}...")
             scores = judge_task(task.prompt, source_files, temp_dir)
@@ -316,8 +385,7 @@ def run_judges(eval_dir: str, all_results: list[dict]) -> dict:
     return judgments
 
 
-def write_report(eval_dir: str, all_results: list[dict],
-                 judgments: dict = None):
+def write_report(eval_dir: str, all_results: list[dict], judgments: dict = None):
     """Write results.md comparison table and results.json raw data."""
 
     raw_data = {"timestamp": datetime.now().isoformat(), "results": all_results}
@@ -363,8 +431,12 @@ def write_report(eval_dir: str, all_results: list[dict],
         r["total_chunks_dropped"] = sum(t["chunks_dropped"] for t in r["tasks"])
         r["total_chunks_kept"] = sum(t["chunks_kept"] for t in r["tasks"])
 
-    lines.append(row("Context chars (original)", "total_context_original", lambda x: f"{x:,}"))
-    lines.append(row("Context chars (final)", "total_context_compressed", lambda x: f"{x:,}"))
+    lines.append(
+        row("Context chars (original)", "total_context_original", lambda x: f"{x:,}")
+    )
+    lines.append(
+        row("Context chars (final)", "total_context_compressed", lambda x: f"{x:,}")
+    )
     lines.append(row("Chunks kept", "total_chunks_kept"))
     lines.append(row("Chunks dropped", "total_chunks_dropped"))
 
@@ -416,6 +488,7 @@ def write_report(eval_dir: str, all_results: list[dict],
         lines.append(task_row("Status", "status"))
         lines.append(task_row("Cost", "cost_usd", lambda x: f"${x:.2f}"))
         lines.append(task_row("Input tokens", "input_tokens", lambda x: f"{x:,}"))
+        lines.append(task_row("Turns", "turns_used"))
         lines.append(task_row("Chunks kept", "chunks_kept"))
         lines.append(task_row("Chunks dropped", "chunks_dropped"))
         lines.append(task_row("Scoring ms", "scoring_latency_ms"))
@@ -434,17 +507,40 @@ def write_report(eval_dir: str, all_results: list[dict],
 
         lines.extend(["", ""])
 
-    lines.extend([
-        "## Compaction Estimate",
-        "",
-        "Assuming compaction triggers at ~100K accumulated input tokens in a shared session:",
-        "",
-    ])
+    lines.extend(
+        [
+            "## Compaction Estimate",
+            "",
+            "Assuming compaction triggers at ~100K accumulated input tokens in a shared session:",
+            "",
+        ]
+    )
     for r in all_results:
         cum_tokens = r["total_input_tokens"]
         est_compactions = cum_tokens // 100000
-        lines.append(f"- **{r['condition']}**: {cum_tokens:,} total input tokens -> ~{est_compactions} compactions in a shared session (Bearing: 0)")
+        lines.append(
+            f"- **{r['condition']}**: {cum_tokens:,} total input tokens -> ~{est_compactions} compactions in a shared session (Bearing: 0)"
+        )
     lines.append("")
+
+    # Context efficiency analysis
+    lines.extend(
+        [
+            "## Notes on Interpretation",
+            "",
+            "**Context size vs total tokens:** Injected context is ~50-300 tokens per task.",
+            "Total per-task consumption is 100K-300K tokens (Claude Code reading files, writing",
+            "code, running tests). Context compression affects <0.1% of total tokens per task.",
+            "The value of compression is in compaction avoidance across long sessions, not",
+            "per-task token savings.",
+            "",
+            "**Execution non-determinism:** Per-task cost and turns vary significantly across",
+            "conditions due to inherent randomness in agentic execution (file reads, test",
+            "retries, tool calls). Single-run results should be interpreted cautiously.",
+            "Multi-trial runs (--trials N) are recommended for statistical confidence.",
+            "",
+        ]
+    )
 
     with open(os.path.join(eval_dir, "results.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
@@ -470,7 +566,9 @@ def run_eval(project_dir: str, skip_judge: bool = False):
 
     result = subprocess.run(
         ["git", "status", "--porcelain"],
-        cwd=project_dir, capture_output=True, text=True,
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
     )
     if result.stdout.strip():
         print("Error: Uncommitted changes detected. Commit or stash first.")
@@ -485,6 +583,7 @@ def run_eval(project_dir: str, skip_judge: bool = False):
     snapshot_state(project_dir, eval_dir)
 
     from relevance import warmup
+
     print("Checking Ollama models...")
     queue = TaskQueue.load(tasks_path)
     warmup_status = warmup(
@@ -499,7 +598,9 @@ def run_eval(project_dir: str, skip_judge: bool = False):
         print("Warning: Skipping embedding conditions (Ollama not available)")
         conditions_to_run = [c for c in conditions_to_run if "embedding" not in c]
     if not warmup_status["compression"]:
-        print("Warning: Skipping embedding+llm condition (compression model not available)")
+        print(
+            "Warning: Skipping embedding+llm condition (compression model not available)"
+        )
         conditions_to_run = [c for c in conditions_to_run if c != "embedding+llm"]
 
     all_results = []
@@ -516,8 +617,8 @@ def run_eval(project_dir: str, skip_judge: bool = False):
 
     write_report(eval_dir, all_results, judgments)
 
-    print(f"\n{'='*60}")
-    print(f"  Evaluation complete")
-    print(f"{'='*60}")
+    print(f"\n{'=' * 60}")
+    print("  Evaluation complete")
+    print(f"{'=' * 60}")
     print(f"\nResults: {os.path.join(eval_dir, 'results.md')}")
     print(f"Raw data: {os.path.join(eval_dir, 'results.json')}")

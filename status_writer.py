@@ -25,7 +25,6 @@ def format_tokens(result) -> str:
     if total == 0:
         return ""
     if result.cache_read_tokens > 0:
-        fresh = result.fresh_input_tokens
         cached = result.cache_read_tokens
         return f"{total:,} tokens ({cached:,} cached)"
     return f"{total:,} tokens"
@@ -59,12 +58,14 @@ def write_status(queue: TaskQueue, path: str, message: str = ""):
     failed = counts.get(TaskStatus.FAILED, 0)
     paused = counts.get(TaskStatus.AWAITING_REVIEW, 0)
 
-    lines.extend([
-        f"**Progress: {completed}/{total} tasks complete**"
-        + (f" | {failed} failed" if failed else "")
-        + (f" | {paused} awaiting review" if paused else ""),
-        "",
-    ])
+    lines.extend(
+        [
+            f"**Progress: {completed}/{total} tasks complete**"
+            + (f" | {failed} failed" if failed else "")
+            + (f" | {paused} awaiting review" if paused else ""),
+            "",
+        ]
+    )
 
     # Usage summary — cost is the most accurate metric we have
     total_cost = queue.total_cost
@@ -118,7 +119,10 @@ def write_status(queue: TaskQueue, path: str, message: str = ""):
                 lines.append("")
 
             # Compression and relevance metrics
-            if result.context_chars_original > 0 and result.context_chars_compressed > 0:
+            if (
+                result.context_chars_original > 0
+                and result.context_chars_compressed > 0
+            ):
                 lines.append(
                     f"Context: {result.context_chars_original} → "
                     f"{result.context_chars_compressed} chars"

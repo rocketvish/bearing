@@ -26,7 +26,10 @@ OLLAMA_BASE = "http://localhost:11434"
 
 # --- Ollama API ---
 
-def ollama_embed(texts: list[str], model: str = "nomic-embed-text") -> Optional[list[list[float]]]:
+
+def ollama_embed(
+    texts: list[str], model: str = "nomic-embed-text"
+) -> Optional[list[list[float]]]:
     """
     Get embedding vectors for a list of texts from Ollama.
     Returns None if Ollama is unavailable or model not pulled.
@@ -53,11 +56,13 @@ def ollama_generate(prompt: str, model: str = "gemma4:26b") -> Optional[str]:
     Generate text from Ollama. Returns None if unavailable.
     """
     try:
-        payload = json.dumps({
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-        }).encode()
+        payload = json.dumps(
+            {
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+            }
+        ).encode()
         req = urllib.request.Request(
             f"{OLLAMA_BASE}/api/generate",
             data=payload,
@@ -83,7 +88,9 @@ def clear_cache():
     _embedding_cache.clear()
 
 
-def get_embeddings(texts: list[str], model: str = "nomic-embed-text") -> Optional[list[list[float]]]:
+def get_embeddings(
+    texts: list[str], model: str = "nomic-embed-text"
+) -> Optional[list[list[float]]]:
     """
     Get embeddings with caching. Cached texts are not re-sent to Ollama.
     Returns None if Ollama is unavailable.
@@ -108,6 +115,7 @@ def get_embeddings(texts: list[str], model: str = "nomic-embed-text") -> Optiona
 
 # --- Similarity ---
 
+
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Compute cosine similarity between two vectors."""
     dot = sum(x * y for x, y in zip(a, b))
@@ -120,12 +128,14 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 
 # --- Compression ---
 
+
 def template_compress(chunk_text: str) -> str:
     """
     Template-based compression for mid-tier chunks.
     Extracts structured fields without LLM call.
     """
     from executor import parse_context_entries
+
     entries = parse_context_entries(chunk_text)
     if not entries:
         return chunk_text[:100]
@@ -139,8 +149,9 @@ def template_compress(chunk_text: str) -> str:
     return " | ".join(parts)
 
 
-def llm_compress(chunks: list[str], task_prompt: str,
-                 model: str = "gemma4:26b") -> list[str]:
+def llm_compress(
+    chunks: list[str], task_prompt: str, model: str = "gemma4:26b"
+) -> list[str]:
     """
     LLM-based compression for mid-tier chunks. Batches all chunks
     into one Gemma call for efficiency.
@@ -149,7 +160,7 @@ def llm_compress(chunks: list[str], task_prompt: str,
     if not chunks:
         return []
 
-    numbered = "\n".join(f"{i+1}. {c}" for i, c in enumerate(chunks))
+    numbered = "\n".join(f"{i + 1}. {c}" for i, c in enumerate(chunks))
     prompt = (
         f"Compress each numbered summary to one sentence, "
         f"keeping only details relevant to this task: {task_prompt[:200]}\n\n"
@@ -162,13 +173,13 @@ def llm_compress(chunks: list[str], task_prompt: str,
         return [template_compress(c) for c in chunks]
 
     # Parse numbered responses
-    lines = [l.strip() for l in result.strip().split("\n") if l.strip()]
+    lines = [ln.strip() for ln in result.strip().split("\n") if ln.strip()]
     compressed = []
     for i, chunk in enumerate(chunks):
         # Try to find matching numbered line
         found = False
         for line in lines:
-            if line.startswith(f"{i+1}.") or line.startswith(f"{i+1})"):
+            if line.startswith(f"{i + 1}.") or line.startswith(f"{i + 1})"):
                 # Strip the number prefix
                 text = line.split(".", 1)[-1].strip() if "." in line else line
                 if text.startswith(")"):
@@ -183,6 +194,7 @@ def llm_compress(chunks: list[str], task_prompt: str,
 
 
 # --- Main Scoring Pipeline ---
+
 
 def score_and_compress(
     context_chunks: list[str],
@@ -229,17 +241,14 @@ def score_and_compress(
     task_embedding = embeddings[-1]
     chunk_embeddings = embeddings[:-1]
 
-    scores = [
-        cosine_similarity(ce, task_embedding)
-        for ce in chunk_embeddings
-    ]
+    scores = [cosine_similarity(ce, task_embedding) for ce in chunk_embeddings]
     metrics["scoring_latency_ms"] = int((time.time() - t0) * 1000)
     metrics["scores"] = [round(s, 4) for s in scores]
 
     # Categorize chunks
-    kept = []        # verbatim
+    kept = []  # verbatim
     mid_chunks = []  # to compress
-    mid_indices = [] # track original positions
+    mid_indices = []  # track original positions
 
     for i, (chunk, score) in enumerate(zip(context_chunks, scores)):
         if score >= threshold_keep:
@@ -265,7 +274,6 @@ def score_and_compress(
 
     # Reassemble in original order
     result = []
-    kept_idx = 0
     mid_idx = 0
     for i, (chunk, score) in enumerate(zip(context_chunks, scores)):
         if score >= threshold_keep:
@@ -278,9 +286,11 @@ def score_and_compress(
     return result, metrics
 
 
-def warmup(embedding_model: str = "nomic-embed-text",
-           compression_model: str = "gemma4:26b",
-           use_llm: bool = False) -> dict:
+def warmup(
+    embedding_model: str = "nomic-embed-text",
+    compression_model: str = "gemma4:26b",
+    use_llm: bool = False,
+) -> dict:
     """
     Warm up Ollama models with dummy calls. Returns status dict.
     """

@@ -29,8 +29,12 @@ import time
 import subprocess
 
 from tasks_schema import (
-    TaskQueue, Task, TaskResult, TaskStatus,
-    CheckpointLevel, FailurePolicy, ExecutionConfig,
+    TaskQueue,
+    Task,
+    TaskStatus,
+    CheckpointLevel,
+    FailurePolicy,
+    ExecutionConfig,
 )
 from executor import run_task, check_cli_installed, assemble_prompt
 from status_writer import write_status
@@ -186,8 +190,7 @@ def propagate_context(queue: TaskQueue, completed_task: Task):
     elif completed_task.result.status in (TaskStatus.FAILED, TaskStatus.SKIPPED):
         error_snippet = completed_task.result.error[:150].replace("\n", " ").strip()
         context_entry = (
-            f"[{completed_task.id}: {completed_task.name} | FAILED] "
-            f"{error_snippet}"
+            f"[{completed_task.id}: {completed_task.name} | FAILED] {error_snippet}"
         )
     else:
         return
@@ -247,7 +250,7 @@ def start_planner(project_dir: str):
     print("Which model?")
     for i, (_, label) in enumerate(models, 1):
         print(f"  {i}. {label}")
-    model_choice = input(f"Choice [1]: ").strip()
+    model_choice = input("Choice [1]: ").strip()
 
     try:
         model_idx = int(model_choice) - 1 if model_choice else 0
@@ -331,6 +334,7 @@ def run_orchestrator(project_dir: str, format_override: str = None):
     # Warm up Ollama models if using embedding-based formats
     if context_format in ("embedding", "embedding+llm"):
         from relevance import warmup, clear_cache
+
         clear_cache()
         print("Warming up local models...")
         status = warmup(
@@ -366,7 +370,8 @@ def run_orchestrator(project_dir: str, format_override: str = None):
 
         # Assemble prompt separately for debug logging
         prompt, metrics = assemble_prompt(
-            task, context_format,
+            task,
+            context_format,
             threshold_keep=queue.relevance_threshold_keep,
             threshold_drop=queue.relevance_threshold_drop,
             embedding_model=queue.embedding_model,
@@ -379,29 +384,50 @@ def run_orchestrator(project_dir: str, format_override: str = None):
             f.write(f"# Bearing debug: {task.id}\n")
             f.write(f"# Format: {context_format}\n")
             if metrics["context_original"] > 0:
-                f.write(f"# Context: {metrics['context_original']} -> {metrics['context_compressed']} chars\n")
-            if metrics.get("chunks_kept") or metrics.get("chunks_dropped"):
-                f.write(f"# Chunks: kept={metrics['chunks_kept']} compressed={metrics['chunks_compressed']} dropped={metrics['chunks_dropped']}\n")
+                f.write(
+                    f"# Context: {metrics['context_original']} -> {metrics['context_compressed']} chars\n"
+                )
+            if (
+                metrics.get("chunks_kept")
+                or metrics.get("chunks_dropped")
+                or metrics.get("chunks_compressed")
+            ):
+                f.write(
+                    f"# Chunks: kept={metrics['chunks_kept']} compressed={metrics['chunks_compressed']} dropped={metrics['chunks_dropped']}\n"
+                )
                 f.write(f"# Scores: {metrics.get('scores', [])}\n")
+                f.write(
+                    f"# Thresholds: keep={queue.relevance_threshold_keep} drop={queue.relevance_threshold_drop}\n"
+                )
             if metrics.get("scoring_latency_ms"):
-                f.write(f"# Scoring: {metrics['scoring_latency_ms']}ms, Compression: {metrics['compression_latency_ms']}ms\n")
-            f.write(f"# ---\n\n")
+                f.write(
+                    f"# Scoring: {metrics['scoring_latency_ms']}ms, Compression: {metrics['compression_latency_ms']}ms\n"
+                )
+            f.write("# ---\n\n")
             f.write(prompt)
 
         # Execute
         print(f">> Running: {task.id} -- {task.name}")
-        print(f"   model={task.config.model} effort={task.config.effort} "
-              f"budget=${task.config.budget_usd:.2f}")
+        print(
+            f"   model={task.config.model} effort={task.config.effort} "
+            f"budget=${task.config.budget_usd:.2f}"
+        )
         if metrics["context_original"] > 0:
-            print(f"   context: {metrics['context_original']} -> {metrics['context_compressed']} chars ({context_format})")
+            print(
+                f"   context: {metrics['context_original']} -> {metrics['context_compressed']} chars ({context_format})"
+            )
         if metrics.get("chunks_dropped"):
-            print(f"   relevance: kept={metrics['chunks_kept']} compressed={metrics['chunks_compressed']} dropped={metrics['chunks_dropped']}")
+            print(
+                f"   relevance: kept={metrics['chunks_kept']} compressed={metrics['chunks_compressed']} dropped={metrics['chunks_dropped']}"
+            )
 
         task.result.status = TaskStatus.RUNNING
         queue.save(tasks_path)
         write_status(queue, status_path, f"Running: {task.id}")
 
-        result, _ = run_task(task, project_dir, prompt=prompt, context_format=context_format)
+        result, _ = run_task(
+            task, project_dir, prompt=prompt, context_format=context_format
+        )
         task.result = result
 
         # Store all metrics on the result
@@ -421,15 +447,18 @@ def run_orchestrator(project_dir: str, format_override: str = None):
 
             if task.checkpoint == CheckpointLevel.PAUSE:
                 task.result.status = TaskStatus.AWAITING_REVIEW
-                print(f"   Checkpoint: pausing for review")
+                print("   Checkpoint: pausing for review")
             elif task.checkpoint == CheckpointLevel.NOTIFY:
-                print(f"   Checkpoint: review recommended (continuing)")
+                print("   Checkpoint: review recommended (continuing)")
 
         elif result.status == TaskStatus.FAILED:
             print(f"   FAILED: {result.error[:100]}")
 
-            if task.on_failure == FailurePolicy.RETRY_ONCE and task.result.retry_count == 0:
-                print(f"   Retrying...")
+            if (
+                task.on_failure == FailurePolicy.RETRY_ONCE
+                and task.result.retry_count == 0
+            ):
+                print("   Retrying...")
                 task.result.retry_count = 1
                 task.result.status = TaskStatus.QUEUED
 
@@ -447,7 +476,7 @@ def run_orchestrator(project_dir: str, format_override: str = None):
 
             elif task.on_failure == FailurePolicy.SKIP:
                 task.result.status = TaskStatus.SKIPPED
-                print(f"   Skipping (failure policy)")
+                print("   Skipping (failure policy)")
                 # Propagate failure context so downstream tasks know
                 propagate_context(queue, task)
 
@@ -505,9 +534,12 @@ def show_summary(project_dir: str):
     cost_str = f", ${total_cost:.2f}" if total_cost > 0 else ""
     print(f"{queue.project}: {len(completed)}/{total} done{cost_str}")
 
-    recently_done = [t for t in queue.tasks
-                     if t.result.status in (TaskStatus.COMPLETED, TaskStatus.FAILED,
-                                            TaskStatus.AWAITING_REVIEW)]
+    recently_done = [
+        t
+        for t in queue.tasks
+        if t.result.status
+        in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.AWAITING_REVIEW)
+    ]
     if recently_done:
         last = recently_done[-1]
         label = {
@@ -528,13 +560,13 @@ def show_summary(project_dir: str):
 
     next_task = queue.next_task()
     if paused:
-        print(f"  PAUSED -- awaiting review")
+        print("  PAUSED -- awaiting review")
     elif failed:
         print(f"  STOPPED -- {failed[-1].id} failed")
     elif next_task:
         print(f"  Next: {next_task.id} -- {next_task.name}")
     elif not running:
-        print(f"  All done")
+        print("  All done")
 
 
 def watch_status(project_dir: str, interval: float = 3.0):
@@ -589,8 +621,13 @@ def watch_status(project_dir: str, interval: float = 3.0):
             prev_states = current_states
 
             all_done = all(
-                s in (TaskStatus.COMPLETED, TaskStatus.SKIPPED,
-                      TaskStatus.FAILED, TaskStatus.AWAITING_REVIEW)
+                s
+                in (
+                    TaskStatus.COMPLETED,
+                    TaskStatus.SKIPPED,
+                    TaskStatus.FAILED,
+                    TaskStatus.AWAITING_REVIEW,
+                )
                 for s in current_states.values()
             )
             if all_done and current_states:
@@ -612,6 +649,8 @@ def print_usage():
     print("  bearing validate <project_dir>   Check tasks.json")
     print("  bearing run <project_dir>        Execute queued tasks")
     print("  bearing eval <project_dir>       Run evaluation (4 conditions)")
+    print("  bearing eval-compare <dir>       Bearing vs single session")
+    print("  bearing eval-agent <dir>         Agent compression eval")
     print("  bearing status <project_dir>     Show full status")
     print("  bearing summary <project_dir>    Quick check (for planner)")
     print("  bearing watch <project_dir>      Live updates as tasks run")
@@ -640,8 +679,15 @@ def main():
     while i < len(sys.argv):
         if sys.argv[i] == "--format" and i + 1 < len(sys.argv):
             format_override = sys.argv[i + 1]
-            if format_override not in ("structured", "prose", "embedding", "embedding+llm"):
-                print(f"Error: --format must be 'prose', 'structured', 'embedding', or 'embedding+llm'")
+            if format_override not in (
+                "structured",
+                "prose",
+                "embedding",
+                "embedding+llm",
+            ):
+                print(
+                    "Error: --format must be 'prose', 'structured', 'embedding', or 'embedding+llm'"
+                )
                 print(f"  Got: '{format_override}'")
                 sys.exit(1)
             i += 2
@@ -670,7 +716,16 @@ def main():
         run_orchestrator(project_dir, format_override=format_override)
     elif command == "eval":
         from eval_runner import run_eval
+
         run_eval(project_dir)
+    elif command == "eval-compare":
+        from eval_compare import run_eval_compare
+
+        run_eval_compare(project_dir)
+    elif command == "eval-agent":
+        from eval_agent import run_eval_agent
+
+        run_eval_agent(project_dir)
     elif command in simple_commands:
         if format_override:
             print("Note: --format only applies to 'bearing run'")
