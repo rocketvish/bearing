@@ -237,9 +237,11 @@ def _tool_run_command(command: str, project_dir: str) -> str:
             cwd=project_dir,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
-        output = result.stdout + result.stderr
+        output = (result.stdout or "") + (result.stderr or "")
         if len(output) > 5000:
             output = output[:5000] + "\n... [truncated]"
         if not output.strip():

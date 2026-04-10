@@ -103,6 +103,8 @@ def _run_claude_p_condition(
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=project_dir,
             timeout=1800,
         )
@@ -393,6 +395,8 @@ def run_eval_agent(project_dir: str):
         cwd=project_dir,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if result.stdout.strip():
         print("Error: Uncommitted changes detected. Commit or stash first.")
