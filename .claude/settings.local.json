@@ -30,7 +30,21 @@
       "Bash(.venv/Scripts/python.exe -c \"from eval_agent import run_eval_agent; print\\('eval_agent.py: OK'\\)\")",
       "Bash(.venv/Scripts/python.exe -m bearing)",
       "Bash(xxd \"C:/Users/Rocketfish/projects/bearing-benchmark/.env\")",
-      "Bash(.venv/Scripts/python.exe -c ':*)"
+      "Bash(.venv/Scripts/python.exe -c ':*)",
+      "Bash(ruff format:*)",
+      "Bash(ls C:/Users/Rocketfish/projects/bearing/.venv/Scripts/ruff*)",
+      "Bash(ls C:/Users/Rocketfish/projects/bearing/.venv/Scripts/python*)",
+      "Bash(C:/Users/Rocketfish/projects/bearing/.venv/Scripts/python.exe -m ruff check C:/Users/Rocketfish/projects/bearing/agent.py)",
+      "Bash(C:/Users/Rocketfish/projects/bearing/.venv/Scripts/python.exe -m ruff format --check C:/Users/Rocketfish/projects/bearing/agent.py)",
+      "Bash(pip3 install:*)",
+      "Bash(C:/Users/Rocketfish/projects/bearing/.venv/Scripts/python.exe -m pip install ruff)",
+      "Bash(ls C:/Users/Rocketfish/AppData/Local/Programs/Python/*/Scripts/ruff*)",
+      "Bash(ls C:/Users/Rocketfish/AppData/Roaming/Python/*/Scripts/ruff*)",
+      "Bash(ls /c/Python*/Scripts/ruff*)",
+      "Bash(command -v ruff.exe)",
+      "Bash(C:/Users/Rocketfish/projects/bearing/.venv/Scripts/python.exe -m ensurepip)",
+      "Bash(C:/Users/Rocketfish/projects/bearing/.venv/Scripts/ruff check:*)",
+      "Bash(C:/Users/Rocketfish/projects/bearing/.venv/Scripts/ruff format:*)"
     ]
   }
 }

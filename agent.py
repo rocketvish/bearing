@@ -185,10 +185,13 @@ def _call_api(
             with urllib.request.urlopen(req, timeout=300) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < max_retries:
+            if e.code in (429, 529) and attempt < max_retries:
                 retry_after = e.headers.get("retry-after")
                 wait = int(retry_after) if retry_after else 60
-                print(f"  Rate limited, waiting {wait}s... (attempt {attempt + 1}/{max_retries})")
+                reason = "Rate limited" if e.code == 429 else "Server overloaded"
+                print(
+                    f"  {reason} ({e.code}), waiting {wait}s... (attempt {attempt + 1}/{max_retries})"
+                )
                 time.sleep(wait)
                 continue
             error_body = e.read().decode("utf-8", errors="replace")
