@@ -27,7 +27,10 @@ SYSTEM_PROMPT = (
     "files, writing new files, and running commands as needed. Work efficiently "
     "— read only the files you need, and don't re-read files you've already "
     "seen unless they've changed. When you're done, respond with a brief "
-    "summary of what you built."
+    "summary of what you built. "
+    "IMPORTANT: Do not start long-running processes like servers (npm start, "
+    "node server.js). These will timeout. Only run commands that exit on their "
+    "own, like tests (npm test) or one-off scripts."
 )
 
 TOOL_DEFINITIONS = [

@@ -39,7 +39,7 @@ from tasks_schema import TaskQueue
 CONDITIONS = ["agent-raw", "agent-compressed", "claude-p"]
 
 AGENT_MAX_TURNS = 80
-COMPRESSION_THRESHOLD = 30000
+COMPRESSION_THRESHOLD = 12000
 COOLDOWN_SECONDS = 90
 
 
