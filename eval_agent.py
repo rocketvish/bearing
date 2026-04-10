@@ -415,7 +415,11 @@ def run_eval_agent(project_dir: str):
 
     all_results = []
 
-    for condition in CONDITIONS:
+    for cond_idx, condition in enumerate(CONDITIONS):
+        if cond_idx > 0:
+            print("\n  Waiting 60s between conditions (rate limit cooldown)...")
+            time.sleep(60)
+
         condition_dir = os.path.join(eval_dir, condition)
         os.makedirs(condition_dir, exist_ok=True)
 

@@ -167,14 +167,34 @@ def _call_api(
         method="POST",
     )
 
-    try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"Anthropic API error {e.code}: {error_body[:500]}"
-        ) from None
+    max_retries = 3
+    for attempt in range(max_retries + 1):
+        try:
+            # Request object is consumed after use, rebuild on retry
+            if attempt > 0:
+                req = urllib.request.Request(
+                    ANTHROPIC_API_URL,
+                    data=payload,
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-api-key": api_key,
+                        "anthropic-version": ANTHROPIC_API_VERSION,
+                    },
+                    method="POST",
+                )
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < max_retries:
+                retry_after = e.headers.get("retry-after")
+                wait = int(retry_after) if retry_after else 60
+                print(f"  Rate limited, waiting {wait}s... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait)
+                continue
+            error_body = e.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Anthropic API error {e.code}: {error_body[:500]}"
+            ) from None
 
 
 # --- Tool Execution ---
