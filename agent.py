@@ -104,19 +104,28 @@ def load_api_key(project_dir: str = ".") -> str | None:
 
     env_path = os.path.join(project_dir, ".env")
     if os.path.exists(env_path):
-        try:
-            with open(env_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("ANTHROPIC_API_KEY="):
-                        val = line.split("=", 1)[1].strip()
-                        # Strip quotes if present
-                        if len(val) >= 2 and val[0] in ('"', "'") and val[-1] == val[0]:
-                            val = val[1:-1]
-                        if val:
-                            return val
-        except OSError:
-            pass
+        # Try UTF-8 first, fall back to UTF-16 (PowerShell writes UTF-16 with BOM)
+        for encoding in ("utf-8", "utf-16"):
+            try:
+                with open(env_path, "r", encoding=encoding) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("ANTHROPIC_API_KEY="):
+                            val = line.split("=", 1)[1].strip()
+                            # Strip quotes if present
+                            if (
+                                len(val) >= 2
+                                and val[0] in ('"', "'")
+                                and val[-1] == val[0]
+                            ):
+                                val = val[1:-1]
+                            if val:
+                                return val
+                break  # File read successfully, no need to try next encoding
+            except UnicodeDecodeError:
+                continue
+            except OSError:
+                break
 
     return None
 
