@@ -28,9 +28,10 @@ SYSTEM_PROMPT = (
     "— read only the files you need, and don't re-read files you've already "
     "seen unless they've changed. When you're done, respond with a brief "
     "summary of what you built. "
-    "IMPORTANT: Do not start long-running processes like servers (npm start, "
-    "node server.js). These will timeout. Only run commands that exit on their "
-    "own, like tests (npm test) or one-off scripts."
+    "NEVER run commands that start servers or long-running processes "
+    "(npm start, node server.js, node index.js, node src/index.js). "
+    "These will timeout and waste turns. Only run commands that exit on "
+    "their own like npm test, node -e, or ls."
 )
 
 TOOL_DEFINITIONS = [
@@ -191,12 +192,46 @@ def _call_api(
         "messages": messages,
     }
     if tools:
-        body["tools"] = tools
+        if use_caching:
+            # Cache breakpoint on last tool: caches system + tools prefix
+            cached_tools = list(tools)
+            cached_tools[-1] = {
+                **cached_tools[-1],
+                "cache_control": {"type": "ephemeral"},
+            }
+            body["tools"] = cached_tools
+        else:
+            body["tools"] = tools
     if use_thinking:
         body["thinking"] = {"type": "enabled", "budget_tokens": 10000}
         # max_tokens must accommodate thinking budget + text/tool output
         if body["max_tokens"] < 16000:
             body["max_tokens"] = 16000
+
+    # Cache breakpoint on last message: caches entire conversation prefix.
+    # This is the key optimization — on turn N, system + tools + all messages
+    # from turns 1..N-1 hit the cache. Only the new tool results are uncached.
+    if use_caching and messages:
+        cached_messages = list(messages)
+        last_msg = {**cached_messages[-1]}
+        content = last_msg.get("content", "")
+        if isinstance(content, str):
+            last_msg["content"] = [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        elif isinstance(content, list) and content:
+            cached_content = list(content)
+            cached_content[-1] = {
+                **cached_content[-1],
+                "cache_control": {"type": "ephemeral"},
+            }
+            last_msg["content"] = cached_content
+        cached_messages[-1] = last_msg
+        body["messages"] = cached_messages
 
     payload = json.dumps(body).encode("utf-8")
 
@@ -422,9 +457,15 @@ def run_agent(
         per_turn_cache_creation.append(cache_creation)
         per_turn_thinking.append(thinking_tokens)
 
-        # Print full usage on first turn for debugging
-        if turn == 0:
-            print(f"  [DEBUG] Full usage dict: {usage}")
+        # Print full usage on first two turns for debugging cache behavior
+        if turn < 2:
+            print(f"  [DEBUG] Turn {turn + 1} usage: {usage}")
+            if turn == 0 and use_caching:
+                print(
+                    "  [DEBUG] Caching enabled: system=content_block_array, "
+                    "beta_header=prompt-caching-2024-07-31, "
+                    "cache_breakpoints=system+last_tool+last_message"
+                )
 
         # Build status line
         parts = [f"  Turn {turn + 1}: {total_input_this_turn:,} in"]
