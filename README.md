@@ -139,10 +139,43 @@ bearing watch .       Live-tail task changes
 bearing validate .    Check tasks.json syntax
 ```
 
+## Agent Mode
+
+Bearing includes a standalone tool-use agent (`agent.py`) that calls the Anthropic API directly via urllib with three tools: `read_file`, `write_file`, `run_command`. No SDK dependency.
+
+Features:
+- **Prompt caching**: Cache breakpoints on system prompt, last tool definition, and last message. Cache reads cost 0.1x input price.
+- **Extended thinking**: Optional thinking budget (10K tokens) for complex reasoning. Thinking blocks preserved in history for API continuity.
+- **Mid-conversation compression**: When input tokens exceed a threshold, compress history via API summarization (lossy) or selective retrieval (lossless).
+- **Selective retrieval**: Embeds each conversation turn via Ollama (nomic-embed-text), retrieves only the top-K most relevant turns by cosine similarity. Kept turns are verbatim -- no information loss on retained context.
+- **Command blocklist**: Blocks server-starting commands (`npm start`, `node server.js`, `index.js`) at the tool level to prevent agent hangs.
+
+```python
+from agent import run_agent
+
+result = run_agent(
+    task_prompt="Build a REST API with tests",
+    project_dir="./my-project",
+    compression_mode="retrieval",  # "none", "api", "ollama", or "retrieval"
+    use_caching=True,
+    use_thinking=True,
+)
+```
+
+## Eval Framework
+
+Bearing ships with evaluation tools for measuring context management strategies:
+
+- **`bearing eval`** -- 4-condition context format comparison (prose, structured, embedding, embedding+llm)
+- **`bearing eval-compare`** -- Bearing's 8-session task isolation vs single mega-prompt session
+- **`bearing eval-agent`** -- 7-condition agent eval: raw, compressed, cached, compressed+cached, retrieval, retrieval+cached, and claude-p baseline
+
+The agent eval runs all 8 tasks as a single mega-prompt to force context accumulation past compression/retrieval thresholds. Reports include per-turn token tables, compression sawtooth patterns, retrieval score distributions, cost breakdowns with cached pricing, and per-task quality judgments.
+
 ## What This Is Not
 
 Not Conductor (the Mac app for parallel agents). Not Gas Town (20-agent swarms). Not gstack (role-switching within one session).
 
 Those tools answer "how do I run more agents?" Bearing answers a different question: "how do I think clearly about what to build while AI builds it?"
 
-This is just four Python files, no UI or dependencies. Uses standard MIT license.
+Pure Python, no UI or external dependencies beyond the Anthropic API and optionally Ollama. Uses standard MIT license.

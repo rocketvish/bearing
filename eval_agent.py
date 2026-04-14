@@ -1,14 +1,18 @@
 """
-Bearing - Eval: Agent Compression
+Bearing - Eval: Agent Compression & Retrieval
 
-Runs all 8 tasks as a single mega-prompt agent session under three conditions:
-    1. agent-raw        — Our agent, no compression (baseline accumulation)
-    2. agent-compressed — Our agent, API compression at 30K threshold
-    3. claude-p         — Claude Code CLI (or cached from eval-compare results)
+Runs all 8 tasks as a single mega-prompt agent session under seven conditions:
+    1. agent-raw              — No compression, no caching (baseline)
+    2. agent-compressed       — API compression at threshold
+    3. agent-cached           — Prompt caching, no compression
+    4. agent-compressed-cached — Both compression + caching
+    5. agent-retrieval        — Embedding-based selective history retrieval
+    6. agent-retrieval-cached — Retrieval + prompt caching
+    7. claude-p               — Claude Code CLI (or cached from eval-compare)
 
 The mega-prompt naturally accumulates 30K+ tokens as the agent builds 8 features,
-triggering compression events in the agent-compressed condition. The key output is
-a per-turn input token table showing accumulation curves and compression sawtooth.
+triggering compression/retrieval events. The key output is a per-turn input token
+table showing accumulation curves, compression sawtooth, and retrieval drops.
 
 Usage:
     bearing eval-agent <project_dir>
@@ -41,6 +45,8 @@ CONDITIONS = [
     "agent-compressed",
     "agent-cached",
     "agent-compressed-cached",
+    "agent-retrieval",
+    "agent-retrieval-cached",
     "claude-p",
 ]
 
@@ -56,7 +62,12 @@ def _run_agent_condition(
     condition_dir: str,
 ) -> dict:
     """Run one of the agent conditions with the mega-prompt."""
-    compression_mode = "api" if "compressed" in condition else "none"
+    if "retrieval" in condition:
+        compression_mode = "retrieval"
+    elif "compressed" in condition:
+        compression_mode = "api"
+    else:
+        compression_mode = "none"
     use_caching = "cached" in condition
 
     print(
@@ -92,6 +103,7 @@ def _run_agent_condition(
         ),
         "per_turn_thinking_tokens": result.get("per_turn_thinking_tokens", []),
         "compressions": result["compressions"],
+        "retrievals": result.get("retrievals", []),
         "cost_usd": result["cost_usd"],
         "wall_time_s": result["wall_time_s"],
         "summary": result["summary"],
@@ -133,6 +145,7 @@ def _load_claude_p_from_cache(eval_dir: str) -> dict | None:
         "per_turn_cache_creation_tokens": [],
         "per_turn_thinking_tokens": [],
         "compressions": [],
+        "retrievals": [],
         "cost_usd": round(single.get("total_cost", 0), 4),
         "wall_time_s": round(single.get("wall_time_s", 0), 1),
         "summary": "(cached from eval-compare)",
@@ -191,6 +204,7 @@ def _run_claude_p_condition(
             "per_turn_input_tokens": [],
             "per_turn_output_tokens": [],
             "compressions": [],
+            "retrievals": [],
             "cost_usd": 0.0,
             "wall_time_s": 3600.0,
             "summary": "Timed out",
@@ -232,6 +246,7 @@ def _run_claude_p_condition(
         "per_turn_cache_creation_tokens": [],
         "per_turn_thinking_tokens": [],
         "compressions": [],
+        "retrievals": [],
         "cost_usd": round(cost, 4),
         "wall_time_s": round(wall_time, 1),
         "summary": summary,
@@ -313,6 +328,8 @@ def _write_report(
     # Abbreviate long condition names for table readability
     cond_labels = {c: c for c in CONDITIONS}
     cond_labels["agent-compressed-cached"] = "comp-cached"
+    cond_labels["agent-retrieval"] = "retrieval"
+    cond_labels["agent-retrieval-cached"] = "ret-cached"
 
     header = "| Metric |"
     sep = "|--------|"
@@ -518,6 +535,73 @@ def _write_report(
                 )
             lines.extend(["", ""])
 
+    # --- Retrieval Analysis ---
+    any_retrievals = any(
+        r.get("retrievals") for r in all_results if r["condition"] != "claude-p"
+    )
+    if any_retrievals:
+        lines.extend(["## Retrieval Analysis", ""])
+
+        for cond in agent_conditions:
+            r = next((x for x in all_results if x["condition"] == cond), None)
+            if not r or not r.get("retrievals"):
+                continue
+
+            lines.extend([f"### {cond}", ""])
+
+            for ret in r["retrievals"]:
+                lines.extend(
+                    [
+                        f"**Turn {ret['turn']}** — "
+                        f"retrieved {ret['retrieved']}/{ret['total_stored']} turns "
+                        f"(tokens before: {ret['tokens_before']:,}, "
+                        f"ollama: {'yes' if ret['ollama_available'] else 'no'})",
+                        "",
+                    ]
+                )
+
+                scores = ret.get("scores", [])
+                if scores:
+                    score_vals = [s for _, s in scores]
+                    min_s = min(score_vals)
+                    max_s = max(score_vals)
+                    mean_s = sum(score_vals) / len(score_vals)
+                    sorted_vals = sorted(score_vals)
+                    mid = len(sorted_vals) // 2
+                    median_s = (
+                        sorted_vals[mid]
+                        if len(sorted_vals) % 2
+                        else (sorted_vals[mid - 1] + sorted_vals[mid]) / 2
+                    )
+
+                    lines.extend(
+                        [
+                            "| Stat | Value |",
+                            "|------|-------|",
+                            f"| Min | {min_s:.4f} |",
+                            f"| Max | {max_s:.4f} |",
+                            f"| Mean | {mean_s:.4f} |",
+                            f"| Median | {median_s:.4f} |",
+                            "",
+                            "Scores per turn:",
+                            "",
+                            "| Turn | Score | Status |",
+                            "|------|-------|--------|",
+                        ]
+                    )
+                    # Determine which turns were kept
+                    kept_turns = set()
+                    scored_sorted = sorted(scores, key=lambda x: x[1], reverse=True)
+                    for i, (tn, _) in enumerate(scored_sorted):
+                        if i < ret["retrieved"]:
+                            kept_turns.add(tn)
+
+                    for turn_num, score in scores:
+                        status_str = "kept" if turn_num in kept_turns else "dropped"
+                        lines.append(f"| {turn_num} | {score:.4f} | {status_str} |")
+
+                    lines.extend(["", ""])
+
     # --- Per-task quality scores ---
     if judgments:
         lines.extend(
@@ -623,6 +707,13 @@ def _write_report(
             "enough context accumulates (30K+ tokens) to trigger compression. This",
             "matches the eval-compare methodology for fair comparison.",
             "",
+            "**Retrieval vs compression:** Retrieval keeps the original messages",
+            "verbatim (no lossy summarization) but drops less-relevant turns entirely.",
+            "The quality tradeoff: compression loses detail across all turns, retrieval",
+            "loses entire turns but keeps kept ones lossless. Score distribution",
+            "(min/max/mean/median) shows whether embedding similarity meaningfully",
+            "differentiates turns or clusters them together.",
+            "",
         ]
     )
 
@@ -632,7 +723,7 @@ def _write_report(
 
 def run_eval_agent(project_dir: str):
     """
-    Run the agent compression eval: 5 conditions, all tasks as mega-prompt.
+    Run the agent compression eval: 7 conditions, all tasks as mega-prompt.
     """
     project_dir = os.path.abspath(project_dir)
     eval_dir = os.path.join(project_dir, "eval")

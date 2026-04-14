@@ -379,6 +379,7 @@ def run_agent(
     compression_mode: str = "none",
     compression_threshold: int = 30000,
     compression_model: str = "gemma4:26b",
+    retrieval_top_k: int = 5,
     use_caching: bool = False,
     use_thinking: bool = False,
 ) -> dict:
@@ -390,9 +391,10 @@ def run_agent(
         project_dir: Working directory for file operations
         model: Anthropic model ID
         max_turns: Maximum conversation turns
-        compression_mode: "none", "api", or "ollama"
+        compression_mode: "none", "api", "ollama", or "retrieval"
         compression_threshold: Compress when total input tokens exceeds this
         compression_model: Ollama model for "ollama" compression mode
+        retrieval_top_k: Number of turns to retrieve in "retrieval" mode
         use_caching: Enable prompt caching (cache system prompt)
         use_thinking: Enable extended thinking (budget: 10K tokens)
 
@@ -418,6 +420,7 @@ def run_agent(
             "per_turn_cache_creation_tokens": [],
             "per_turn_thinking_tokens": [],
             "compressions": [],
+            "retrievals": [],
             "cost_usd": 0.0,
             "wall_time_s": 0.0,
         }
@@ -429,9 +432,17 @@ def run_agent(
     per_turn_cache_creation = []
     per_turn_thinking = []
     compressions = []
+    retrievals = []
     final_text = ""
     status = "completed"
     just_compressed = False
+
+    # Initialize retriever if using retrieval mode
+    retriever = None
+    if compression_mode == "retrieval":
+        from retriever import TurnRetriever
+
+        retriever = TurnRetriever()
 
     t_start = time.time()
 
@@ -490,6 +501,8 @@ def run_agent(
         if just_compressed:
             note = " [cache reset]"
             just_compressed = False
+        if retriever is not None:
+            note += f" [stored: {len(retriever.turns)}]"
         parts.append(f"  (stop: {response.get('stop_reason', '?')}){note}")
         print("".join(parts))
 
@@ -532,8 +545,44 @@ def run_agent(
 
         messages.append({"role": "user", "content": tool_results})
 
-        # Check if we should compress (use total input for threshold comparison)
-        if compression_mode != "none" and total_input_this_turn > compression_threshold:
+        # Store turn in retriever (before potential retrieval replaces messages)
+        if retriever is not None:
+            retriever.store_turn(turn + 1, assistant_msg, tool_results)
+
+        # Check if we should compress/retrieve (use total input for threshold)
+        if (
+            compression_mode == "retrieval"
+            and total_input_this_turn > compression_threshold
+        ):
+            print(
+                f"  Retrieving top-{retrieval_top_k} turns "
+                f"(total_input={total_input_this_turn:,} > "
+                f"threshold={compression_threshold:,})..."
+            )
+            new_messages, ret_metrics = retriever.build_retrieved_history(
+                original_task_prompt=task_prompt, top_k=retrieval_top_k
+            )
+            retrievals.append(
+                {
+                    "turn": turn + 1,
+                    "tokens_before": total_input_this_turn,
+                    "total_stored": ret_metrics["total_stored"],
+                    "retrieved": ret_metrics["retrieved"],
+                    "scores": ret_metrics["scores"],
+                    "ollama_available": ret_metrics["ollama_available"],
+                }
+            )
+            messages = new_messages
+            just_compressed = True
+            print(
+                f"  Retrieved {ret_metrics['retrieved']}/{ret_metrics['total_stored']}"
+                f" turns (ollama={'yes' if ret_metrics['ollama_available'] else 'no'})"
+            )
+        elif (
+            compression_mode != "none"
+            and compression_mode != "retrieval"
+            and total_input_this_turn > compression_threshold
+        ):
             print(
                 f"  Compressing history (total_input={total_input_this_turn:,} > "
                 f"threshold={compression_threshold:,})..."
@@ -596,6 +645,7 @@ def run_agent(
         "per_turn_cache_creation_tokens": per_turn_cache_creation,
         "per_turn_thinking_tokens": per_turn_thinking,
         "compressions": compressions,
+        "retrievals": retrievals,
         "cost_usd": round(cost, 4),
         "wall_time_s": round(wall_time, 1),
     }

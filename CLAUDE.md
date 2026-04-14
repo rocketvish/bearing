@@ -9,7 +9,8 @@
 - `eval_compare.py` -- Eval compare: Bearing (8 sessions) vs single session (1 mega-prompt)
 - `agent.py` -- Tool-use agent via Anthropic API (urllib, no SDK), with prompt caching + extended thinking
 - `compressor.py` -- Mid-conversation history compression (API or Ollama backends)
-- `eval_agent.py` -- Eval: agent with/without compression/caching vs claude -p (5 conditions)
+- `retriever.py` -- Embedding-based selective history retrieval via Ollama (nomic-embed-text)
+- `eval_agent.py` -- Eval: agent with/without compression/caching/retrieval vs claude -p (7 conditions)
 - `test_sanity.py` -- Quick sanity test for caching + thinking features
 - `tasks_schema.py` -- Dataclasses for Task, TaskQueue, TaskResult
 - `status_writer.py` -- Generates status.md from task queue state
@@ -55,13 +56,15 @@ agent session (same methodology as eval-compare) to ensure enough context accumu
 (30K+ tokens) to trigger compression. Uses the Anthropic API directly via urllib with
 three tools (read_file, write_file, run_command).
 
-Five conditions: `agent-raw` (no compression, no caching), `agent-compressed` (API
+Seven conditions: `agent-raw` (no compression, no caching), `agent-compressed` (API
 compression at 12K threshold), `agent-cached` (prompt caching, no compression),
-`agent-compressed-cached` (both compression + caching), `claude-p` (loads cached
-results from eval-compare if available, otherwise runs fresh). Key output: per-turn
-input token table showing accumulation curves, cache hit rates, and compression
-sawtooth. Per-task quality judging using the same judge infrastructure as the other
-evals. Report includes per-condition cost breakdowns with cached pricing.
+`agent-compressed-cached` (both compression + caching), `agent-retrieval`
+(embedding-based selective history retrieval via Ollama), `agent-retrieval-cached`
+(retrieval + prompt caching), `claude-p` (loads cached results from eval-compare if
+available, otherwise runs fresh). Key output: per-turn input token table showing
+accumulation curves, cache hit rates, compression sawtooth, and retrieval drops.
+Report includes per-condition cost breakdowns, retrieval analysis (score distribution,
+kept/dropped turns), and per-task quality judging.
 
 ### Agent Features
 
@@ -83,6 +86,13 @@ uncached portion; `total_input = input_tokens + cache_read + cache_creation`. Co
 calculation uses the uncached portion at full price, cache reads at 0.1x, cache
 creation at 1.25x, and thinking at output price.
 
+**Selective retrieval** (`compression_mode="retrieval"`): Instead of lossy
+summarization, embeds each conversation turn via Ollama (nomic-embed-text) and
+retrieves the top-K most relevant turns by cosine similarity to the original task
+prompt. Kept turns are lossless (original messages preserved verbatim). Falls back
+to full history if Ollama is unavailable. Retrieval events are tracked per-turn
+with score distributions.
+
 ## Commands
 
 ```
@@ -90,7 +100,7 @@ bearing start <dir>         # Launch interactive planner session
 bearing run <dir>           # Execute task queue
 bearing eval <dir>          # Run 4-condition evaluation
 bearing eval-compare <dir>  # Bearing vs single session comparison
-bearing eval-agent <dir>    # Agent compression/caching eval (5 conditions)
+bearing eval-agent <dir>    # Agent compression/caching/retrieval eval (7 conditions)
 bearing status <dir>        # Show status
 bearing summary <dir>       # Quick check for planner
 bearing watch <dir>         # Live updates
