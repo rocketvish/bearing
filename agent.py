@@ -345,6 +345,11 @@ def _tool_run_command(command: str, project_dir: str) -> str:
         return _BLOCKED_MSG
     if "npm start" in cmd_lower or "node server.js" in cmd_lower:
         return _BLOCKED_MSG
+    if "node" in cmd_lower and "require" in cmd_lower:
+        return (
+            "Blocked: node require() commands can hang. "
+            "Use npm test to verify code works."
+        )
     try:
         result = subprocess.run(
             command,
