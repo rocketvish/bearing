@@ -91,9 +91,30 @@ TOOL_DEFINITIONS = [
     },
 ]
 
-# Sonnet pricing: $3/MTok input, $15/MTok output
+# Sonnet pricing (per MTok)
 COST_INPUT_PER_MTOK = 3.0
 COST_OUTPUT_PER_MTOK = 15.0
+COST_CACHE_READ_PER_MTOK = 0.30
+COST_CACHE_CREATION_PER_MTOK = 3.75
+
+
+def calculate_cost(
+    input_tokens: int,
+    output_tokens: int,
+    cache_read: int = 0,
+    cache_creation: int = 0,
+    thinking: int = 0,
+) -> float:
+    """
+    Calculate cost with cached and thinking token pricing.
+    input_tokens is the uncached portion from the API.
+    """
+    return (
+        input_tokens * COST_INPUT_PER_MTOK / 1_000_000
+        + cache_read * COST_CACHE_READ_PER_MTOK / 1_000_000
+        + cache_creation * COST_CACHE_CREATION_PER_MTOK / 1_000_000
+        + (output_tokens + thinking) * COST_OUTPUT_PER_MTOK / 1_000_000
+    )
 
 
 def load_api_key(project_dir: str = ".") -> str | None:
@@ -143,30 +164,54 @@ def _call_api(
     system: str = SYSTEM_PROMPT,
     tools: list[dict] | None = None,
     max_tokens: int = 4096,
+    use_caching: bool = False,
+    use_thinking: bool = False,
 ) -> dict:
     """
     Send a request to the Anthropic Messages API.
     Returns the parsed response dict.
     Raises RuntimeError on API errors.
     """
+    # Format system prompt: array with cache_control when caching, plain string otherwise
+    if use_caching:
+        system_value = [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+    else:
+        system_value = system
+
     body = {
         "model": model,
         "max_tokens": max_tokens,
-        "system": system,
+        "system": system_value,
         "messages": messages,
     }
     if tools:
         body["tools"] = tools
+    if use_thinking:
+        body["thinking"] = {"type": "enabled", "budget_tokens": 10000}
+        # max_tokens must accommodate thinking budget + text/tool output
+        if body["max_tokens"] < 16000:
+            body["max_tokens"] = 16000
 
     payload = json.dumps(body).encode("utf-8")
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": api_key,
+        "anthropic-version": ANTHROPIC_API_VERSION,
+    }
+    if use_caching:
+        headers["anthropic-beta"] = "prompt-caching-2024-07-31"
+
     req = urllib.request.Request(
         ANTHROPIC_API_URL,
         data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": ANTHROPIC_API_VERSION,
-        },
+        headers=headers,
         method="POST",
     )
 
@@ -178,11 +223,7 @@ def _call_api(
                 req = urllib.request.Request(
                     ANTHROPIC_API_URL,
                     data=payload,
-                    headers={
-                        "Content-Type": "application/json",
-                        "x-api-key": api_key,
-                        "anthropic-version": ANTHROPIC_API_VERSION,
-                    },
+                    headers=headers,
                     method="POST",
                 )
             with urllib.request.urlopen(req, timeout=300) as resp:
@@ -193,7 +234,8 @@ def _call_api(
                 wait = int(retry_after) if retry_after else 60
                 reason = "Rate limited" if e.code == 429 else "Server overloaded"
                 print(
-                    f"  {reason} ({e.code}), waiting {wait}s... (attempt {attempt + 1}/{max_retries})"
+                    f"  {reason} ({e.code}), waiting {wait}s... "
+                    f"(attempt {attempt + 1}/{max_retries})"
                 )
                 time.sleep(wait)
                 continue
@@ -290,6 +332,8 @@ def run_agent(
     compression_mode: str = "none",
     compression_threshold: int = 30000,
     compression_model: str = "gemma4:26b",
+    use_caching: bool = False,
+    use_thinking: bool = False,
 ) -> dict:
     """
     Run a tool-use agent loop to complete a coding task.
@@ -300,8 +344,10 @@ def run_agent(
         model: Anthropic model ID
         max_turns: Maximum conversation turns
         compression_mode: "none", "api", or "ollama"
-        compression_threshold: Compress when input_tokens exceeds this
+        compression_threshold: Compress when total input tokens exceeds this
         compression_model: Ollama model for "ollama" compression mode
+        use_caching: Enable prompt caching (cache system prompt)
+        use_thinking: Enable extended thinking (budget: 10K tokens)
 
     Returns:
         Dict with status, summary, token counts, cost, timing, etc.
@@ -315,9 +361,15 @@ def run_agent(
             "summary": "No API key",
             "total_input_tokens": 0,
             "total_output_tokens": 0,
+            "total_cache_read_tokens": 0,
+            "total_cache_creation_tokens": 0,
+            "total_thinking_tokens": 0,
             "turns_used": 0,
             "per_turn_input_tokens": [],
             "per_turn_output_tokens": [],
+            "per_turn_cache_read_tokens": [],
+            "per_turn_cache_creation_tokens": [],
+            "per_turn_thinking_tokens": [],
             "compressions": [],
             "cost_usd": 0.0,
             "wall_time_s": 0.0,
@@ -326,9 +378,13 @@ def run_agent(
     messages = [{"role": "user", "content": task_prompt}]
     per_turn_input = []
     per_turn_output = []
+    per_turn_cache_read = []
+    per_turn_cache_creation = []
+    per_turn_thinking = []
     compressions = []
     final_text = ""
     status = "completed"
+    just_compressed = False
 
     t_start = time.time()
 
@@ -340,6 +396,8 @@ def run_agent(
                 model=model,
                 api_key=api_key,
                 tools=TOOL_DEFINITIONS,
+                use_caching=use_caching,
+                use_thinking=use_thinking,
             )
         except RuntimeError as e:
             print(f"  API error on turn {turn + 1}: {e}")
@@ -351,19 +409,44 @@ def run_agent(
         usage = response.get("usage", {})
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
-        per_turn_input.append(input_tokens)
+        cache_read = usage.get("cache_read_input_tokens", 0)
+        cache_creation = usage.get("cache_creation_input_tokens", 0)
+        thinking_tokens = usage.get("thinking_tokens", 0)
+
+        # Total input includes all categories (uncached + cache_read + cache_creation)
+        total_input_this_turn = input_tokens + cache_read + cache_creation
+
+        per_turn_input.append(total_input_this_turn)
         per_turn_output.append(output_tokens)
+        per_turn_cache_read.append(cache_read)
+        per_turn_cache_creation.append(cache_creation)
+        per_turn_thinking.append(thinking_tokens)
 
-        print(
-            f"  Turn {turn + 1}: {input_tokens:,} in / {output_tokens:,} out"
-            f"  (stop: {response.get('stop_reason', '?')})"
-        )
+        # Print full usage on first turn for debugging
+        if turn == 0:
+            print(f"  [DEBUG] Full usage dict: {usage}")
 
-        # Process response content
+        # Build status line
+        parts = [f"  Turn {turn + 1}: {total_input_this_turn:,} in"]
+        if use_caching:
+            parts[0] += f" ({cache_read:,} cached)"
+        parts.append(f" / {output_tokens:,} out")
+        if use_thinking and thinking_tokens > 0:
+            parts.append(f" ({thinking_tokens:,} thinking)")
+        note = ""
+        if just_compressed:
+            note = " [cache reset]"
+            just_compressed = False
+        parts.append(f"  (stop: {response.get('stop_reason', '?')}){note}")
+        print("".join(parts))
+
+        # Process response content — preserve thinking blocks for conversation history
         content = response.get("content", [])
         tool_calls = []
         for block in content:
-            if block.get("type") == "text":
+            if block.get("type") in ("thinking", "redacted_thinking"):
+                pass  # Internal reasoning — track via usage, don't act
+            elif block.get("type") == "text":
                 final_text = block.get("text", "")
             elif block.get("type") == "tool_use":
                 tool_calls.append(block)
@@ -373,6 +456,7 @@ def run_agent(
             break
 
         # Execute tools and build tool_result messages
+        # Preserve full content (including thinking blocks) — API requires them
         assistant_msg = {"role": "assistant", "content": content}
         messages.append(assistant_msg)
 
@@ -395,10 +479,10 @@ def run_agent(
 
         messages.append({"role": "user", "content": tool_results})
 
-        # Check if we should compress
-        if compression_mode != "none" and input_tokens > compression_threshold:
+        # Check if we should compress (use total input for threshold comparison)
+        if compression_mode != "none" and total_input_this_turn > compression_threshold:
             print(
-                f"  Compressing history (input_tokens={input_tokens:,} > "
+                f"  Compressing history (total_input={total_input_this_turn:,} > "
                 f"threshold={compression_threshold:,})..."
             )
             from compressor import compress_history
@@ -413,14 +497,15 @@ def run_agent(
             compressions.append(
                 {
                     "turn": turn + 1,
-                    "tokens_before": input_tokens,
+                    "tokens_before": total_input_this_turn,
                     "tokens_after": comp_metrics.get("tokens_after", 0),
                     "compression_tokens": comp_metrics.get("compression_tokens", 0),
                 }
             )
             messages = new_messages
+            just_compressed = True  # Next turn will note cache invalidation
             print(
-                f"  Compressed: {input_tokens:,} -> "
+                f"  Compressed: {total_input_this_turn:,} -> "
                 f"~{comp_metrics.get('tokens_after', 0):,} tokens"
             )
     else:
@@ -429,9 +514,18 @@ def run_agent(
     wall_time = time.time() - t_start
     total_input = sum(per_turn_input)
     total_output = sum(per_turn_output)
-    cost = (
-        total_input * COST_INPUT_PER_MTOK / 1_000_000
-        + total_output * COST_OUTPUT_PER_MTOK / 1_000_000
+    total_cache_read = sum(per_turn_cache_read)
+    total_cache_creation = sum(per_turn_cache_creation)
+    total_thinking = sum(per_turn_thinking)
+
+    # Cost: input_tokens from API is uncached; derive from totals
+    total_uncached = total_input - total_cache_read - total_cache_creation
+    cost = calculate_cost(
+        total_uncached,
+        total_output,
+        total_cache_read,
+        total_cache_creation,
+        total_thinking,
     )
 
     return {
@@ -439,9 +533,15 @@ def run_agent(
         "summary": final_text[:2000],
         "total_input_tokens": total_input,
         "total_output_tokens": total_output,
+        "total_cache_read_tokens": total_cache_read,
+        "total_cache_creation_tokens": total_cache_creation,
+        "total_thinking_tokens": total_thinking,
         "turns_used": len(per_turn_input),
         "per_turn_input_tokens": per_turn_input,
         "per_turn_output_tokens": per_turn_output,
+        "per_turn_cache_read_tokens": per_turn_cache_read,
+        "per_turn_cache_creation_tokens": per_turn_cache_creation,
+        "per_turn_thinking_tokens": per_turn_thinking,
         "compressions": compressions,
         "cost_usd": round(cost, 4),
         "wall_time_s": round(wall_time, 1),

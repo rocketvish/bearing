@@ -36,7 +36,13 @@ from executor import extract_cost, extract_tokens, extract_turns
 from tasks_schema import TaskQueue
 
 
-CONDITIONS = ["agent-raw", "agent-compressed", "claude-p"]
+CONDITIONS = [
+    "agent-raw",
+    "agent-compressed",
+    "agent-cached",
+    "agent-compressed-cached",
+    "claude-p",
+]
 
 AGENT_MAX_TURNS = 80
 COMPRESSION_THRESHOLD = 12000
@@ -49,11 +55,13 @@ def _run_agent_condition(
     condition: str,
     condition_dir: str,
 ) -> dict:
-    """Run one of the agent conditions (raw or compressed) with the mega-prompt."""
-    compression_mode = "none" if condition == "agent-raw" else "api"
+    """Run one of the agent conditions with the mega-prompt."""
+    compression_mode = "api" if "compressed" in condition else "none"
+    use_caching = "cached" in condition
 
     print(
-        f"\n  Running agent (compression={compression_mode}, max_turns={AGENT_MAX_TURNS})..."
+        f"\n  Running agent (compression={compression_mode}, "
+        f"caching={use_caching}, max_turns={AGENT_MAX_TURNS})..."
     )
     result = run_agent(
         task_prompt=mega_prompt,
@@ -61,6 +69,7 @@ def _run_agent_condition(
         compression_mode=compression_mode,
         compression_threshold=COMPRESSION_THRESHOLD,
         max_turns=AGENT_MAX_TURNS,
+        use_caching=use_caching,
     )
 
     # Capture source files
@@ -71,9 +80,17 @@ def _run_agent_condition(
         "status": result["status"],
         "total_input_tokens": result["total_input_tokens"],
         "total_output_tokens": result["total_output_tokens"],
+        "total_cache_read_tokens": result.get("total_cache_read_tokens", 0),
+        "total_cache_creation_tokens": result.get("total_cache_creation_tokens", 0),
+        "total_thinking_tokens": result.get("total_thinking_tokens", 0),
         "turns_used": result["turns_used"],
         "per_turn_input_tokens": result["per_turn_input_tokens"],
         "per_turn_output_tokens": result["per_turn_output_tokens"],
+        "per_turn_cache_read_tokens": result.get("per_turn_cache_read_tokens", []),
+        "per_turn_cache_creation_tokens": result.get(
+            "per_turn_cache_creation_tokens", []
+        ),
+        "per_turn_thinking_tokens": result.get("per_turn_thinking_tokens", []),
         "compressions": result["compressions"],
         "cost_usd": result["cost_usd"],
         "wall_time_s": result["wall_time_s"],
@@ -106,9 +123,15 @@ def _load_claude_p_from_cache(eval_dir: str) -> dict | None:
         "status": "completed" if single.get("completed", 0) > 0 else "error",
         "total_input_tokens": single.get("total_input_tokens", 0),
         "total_output_tokens": single.get("total_output_tokens", 0),
+        "total_cache_read_tokens": 0,
+        "total_cache_creation_tokens": 0,
+        "total_thinking_tokens": 0,
         "turns_used": single.get("total_turns", 0),
         "per_turn_input_tokens": [],
         "per_turn_output_tokens": [],
+        "per_turn_cache_read_tokens": [],
+        "per_turn_cache_creation_tokens": [],
+        "per_turn_thinking_tokens": [],
         "compressions": [],
         "cost_usd": round(single.get("total_cost", 0), 4),
         "wall_time_s": round(single.get("wall_time_s", 0), 1),
@@ -199,9 +222,15 @@ def _run_claude_p_condition(
         "status": "completed" if result.returncode == 0 else "error",
         "total_input_tokens": input_tokens,
         "total_output_tokens": output_tokens,
+        "total_cache_read_tokens": 0,
+        "total_cache_creation_tokens": 0,
+        "total_thinking_tokens": 0,
         "turns_used": turns,
         "per_turn_input_tokens": [],
         "per_turn_output_tokens": [],
+        "per_turn_cache_read_tokens": [],
+        "per_turn_cache_creation_tokens": [],
+        "per_turn_thinking_tokens": [],
         "compressions": [],
         "cost_usd": round(cost, 4),
         "wall_time_s": round(wall_time, 1),
@@ -278,19 +307,32 @@ def _write_report(
         "",
         "## Summary",
         "",
-        "| Metric | agent-raw | agent-compressed | claude-p |",
-        "|--------|-----------|-----------------|----------|",
     ]
+
+    # Build summary table header dynamically from CONDITIONS
+    # Abbreviate long condition names for table readability
+    cond_labels = {c: c for c in CONDITIONS}
+    cond_labels["agent-compressed-cached"] = "comp-cached"
+
+    header = "| Metric |"
+    sep = "|--------|"
+    for cond in CONDITIONS:
+        header += f" {cond_labels[cond]} |"
+        sep += "----------|"
+    lines.extend([header, sep])
 
     def _val(condition, key, fmt=str):
         for r in all_results:
             if r["condition"] == condition:
-                return fmt(r[key])
+                return fmt(r.get(key, 0))
         return "-"
 
     metrics_rows = [
         ("Total input tokens", "total_input_tokens", lambda x: f"{x:,}"),
         ("Total output tokens", "total_output_tokens", lambda x: f"{x:,}"),
+        ("Cache Read Tokens", "total_cache_read_tokens", lambda x: f"{x:,}"),
+        ("Cache Creation Tokens", "total_cache_creation_tokens", lambda x: f"{x:,}"),
+        ("Thinking Tokens", "total_thinking_tokens", lambda x: f"{x:,}"),
         ("Cost USD", "cost_usd", lambda x: f"${x:.4f}"),
         ("Turns", "turns_used", str),
         ("Wall time", "wall_time_s", lambda x: f"{x:.0f}s"),
@@ -303,89 +345,178 @@ def _write_report(
             row += f" {_val(cond, key, fmt)} |"
         lines.append(row)
 
-    # Token efficiency ratio
-    row = "| Input/Output ratio |"
+    # Cache Hit Rate row
+    row = "| Cache Hit Rate |"
     for cond in CONDITIONS:
+        found = False
         for r in all_results:
             if r["condition"] == cond:
-                out = r["total_output_tokens"]
-                ratio = r["total_input_tokens"] / out if out > 0 else 0
-                row += f" {ratio:.1f} |"
+                total_in = r.get("total_input_tokens", 0)
+                cache_read = r.get("total_cache_read_tokens", 0)
+                rate = cache_read / total_in if total_in > 0 else 0
+                row += f" {rate:.1%} |"
+                found = True
                 break
-        else:
+        if not found:
+            row += " - |"
+    lines.append(row)
+
+    # Input/Output ratio row
+    row = "| Input/Output ratio |"
+    for cond in CONDITIONS:
+        found = False
+        for r in all_results:
+            if r["condition"] == cond:
+                out = r.get("total_output_tokens", 0)
+                ratio = r.get("total_input_tokens", 0) / out if out > 0 else 0
+                row += f" {ratio:.1f} |"
+                found = True
+                break
+        if not found:
             row += " - |"
     lines.append(row)
 
     lines.extend(["", ""])
 
-    # --- Per-turn token accumulation table ---
-    raw_result = next((r for r in all_results if r["condition"] == "agent-raw"), None)
-    comp_result = next(
-        (r for r in all_results if r["condition"] == "agent-compressed"), None
+    # --- Cost Breakdown per condition ---
+    lines.extend(["## Cost Breakdown", ""])
+
+    for cond in CONDITIONS:
+        r = next((r for r in all_results if r["condition"] == cond), None)
+        if not r:
+            continue
+
+        total_in = r.get("total_input_tokens", 0)
+        cache_read = r.get("total_cache_read_tokens", 0)
+        cache_creation = r.get("total_cache_creation_tokens", 0)
+        uncached = total_in - cache_read - cache_creation
+        output = r.get("total_output_tokens", 0)
+        thinking = r.get("total_thinking_tokens", 0)
+
+        c_uncached = uncached * 3.00 / 1_000_000
+        c_cache_read = cache_read * 0.30 / 1_000_000
+        c_cache_creation = cache_creation * 3.75 / 1_000_000
+        c_output = output * 15.00 / 1_000_000
+        c_thinking = thinking * 15.00 / 1_000_000
+        c_total = c_uncached + c_cache_read + c_cache_creation + c_output + c_thinking
+
+        lines.extend(
+            [
+                f"### {cond}",
+                "```",
+                f"Input (uncached): {uncached:>8,} tokens"
+                f" x $3.00/MTok = ${c_uncached:.4f}",
+                f"Cache reads:      {cache_read:>8,} tokens"
+                f" x $0.30/MTok = ${c_cache_read:.4f}",
+                f"Cache writes:     {cache_creation:>8,} tokens"
+                f" x $3.75/MTok = ${c_cache_creation:.4f}",
+                f"Output:           {output:>8,} tokens"
+                f" x $15.00/MTok = ${c_output:.4f}",
+                f"Thinking:         {thinking:>8,} tokens"
+                f" x $15.00/MTok = ${c_thinking:.4f}",
+                f"Total:            ${c_total:.4f}",
+                "```",
+                "",
+            ]
+        )
+
+    # --- Per-turn token accumulation (per condition) ---
+    agent_conditions = [c for c in CONDITIONS if c != "claude-p"]
+    any_per_turn = any(
+        r.get("per_turn_input_tokens")
+        for r in all_results
+        if r["condition"] != "claude-p"
     )
 
-    if raw_result or comp_result:
-        lines.extend(
-            [
-                "## Per-Turn Token Accumulation",
-                "",
-                "| Turn | agent-raw input | agent-compressed input | Notes |",
-                "|------|----------------|----------------------|-------|",
-            ]
-        )
+    if any_per_turn:
+        lines.extend(["## Per-Turn Token Accumulation", ""])
 
-        max_turns = max(
-            len(raw_result["per_turn_input_tokens"]) if raw_result else 0,
-            len(comp_result["per_turn_input_tokens"]) if comp_result else 0,
-        )
+        for cond in agent_conditions:
+            r = next((x for x in all_results if x["condition"] == cond), None)
+            if not r or not r.get("per_turn_input_tokens"):
+                continue
 
-        # Build compression turn set for notes
-        comp_turns = {}
-        if comp_result:
-            for c in comp_result.get("compressions", []):
+            cache_read_list = r.get("per_turn_cache_read_tokens", [])
+            thinking_list = r.get("per_turn_thinking_tokens", [])
+            has_cache = any(t > 0 for t in cache_read_list)
+            has_thinking = any(t > 0 for t in thinking_list)
+
+            # Build compression and cache-reset turn sets
+            comp_turns = {}
+            for c in r.get("compressions", []):
                 comp_turns[c["turn"]] = c
+            cache_reset_turns = {c["turn"] + 1 for c in r.get("compressions", [])}
 
-        for i in range(max_turns):
-            raw_val = "-"
-            comp_val = "-"
-            note = ""
+            # Dynamic columns
+            hdr = "| Turn | Input |"
+            sep_row = "|------|-------|"
+            if has_cache:
+                hdr += " Cached |"
+                sep_row += "--------|"
+            if has_thinking:
+                hdr += " Thinking |"
+                sep_row += "----------|"
+            hdr += " Output | Notes |"
+            sep_row += "--------|-------|"
 
-            if raw_result and i < len(raw_result["per_turn_input_tokens"]):
-                raw_val = f"{raw_result['per_turn_input_tokens'][i]:,}"
-            if comp_result and i < len(comp_result["per_turn_input_tokens"]):
-                comp_val = f"{comp_result['per_turn_input_tokens'][i]:,}"
+            lines.extend([f"### {cond}", "", hdr, sep_row])
 
-            if (i + 1) in comp_turns:
-                c = comp_turns[i + 1]
-                note = (
-                    f"compressed {c['tokens_before']:,} -> "
-                    f"~{c['tokens_after']:,} tokens"
-                )
+            n_turns = len(r["per_turn_input_tokens"])
+            for i in range(n_turns):
+                row = f"| {i + 1} | {r['per_turn_input_tokens'][i]:,} |"
+                if has_cache:
+                    cr = cache_read_list[i] if i < len(cache_read_list) else 0
+                    row += f" {cr:,} |"
+                if has_thinking:
+                    th = thinking_list[i] if i < len(thinking_list) else 0
+                    row += f" {th:,} |"
+                out_list = r.get("per_turn_output_tokens", [])
+                out_val = out_list[i] if i < len(out_list) else 0
+                row += f" {out_val:,} |"
 
-            lines.append(f"| {i + 1} | {raw_val} | {comp_val} | {note} |")
+                notes = []
+                if (i + 1) in comp_turns:
+                    c = comp_turns[i + 1]
+                    notes.append(
+                        f"compressed {c['tokens_before']:,} -> ~{c['tokens_after']:,}"
+                    )
+                if (i + 1) in cache_reset_turns:
+                    notes.append("cache reset")
+                row += f" {'; '.join(notes)} |"
+                lines.append(row)
 
-        lines.extend(["", ""])
+            lines.extend(["", ""])
 
     # --- Compression events ---
-    if comp_result and comp_result.get("compressions"):
-        lines.extend(
-            [
-                "## Compression Events",
-                "",
-                "| Turn | Tokens Before | Tokens After | Ratio | Compression Tokens |",
-                "|------|--------------|-------------|-------|-------------------|",
-            ]
-        )
-        for c in comp_result["compressions"]:
-            before = c["tokens_before"]
-            after = c["tokens_after"]
-            ratio = before / after if after > 0 else 0
-            comp_tokens = c.get("compression_tokens", 0)
-            lines.append(
-                f"| {c['turn']} | {before:,} | {after:,} | "
-                f"{ratio:.1f}x | {comp_tokens:,} |"
+    any_compressions = any(
+        r.get("compressions") for r in all_results if r["condition"] != "claude-p"
+    )
+    if any_compressions:
+        lines.extend(["## Compression Events", ""])
+
+        for cond in agent_conditions:
+            r = next((x for x in all_results if x["condition"] == cond), None)
+            if not r or not r.get("compressions"):
+                continue
+            lines.extend(
+                [
+                    f"### {cond}",
+                    "",
+                    "| Turn | Tokens Before | Tokens After"
+                    " | Ratio | Compression Tokens |",
+                    "|------|--------------|-------------|-------|-------------------|",
+                ]
             )
-        lines.extend(["", ""])
+            for c in r["compressions"]:
+                before = c["tokens_before"]
+                after = c["tokens_after"]
+                ratio = before / after if after > 0 else 0
+                comp_tokens = c.get("compression_tokens", 0)
+                lines.append(
+                    f"| {c['turn']} | {before:,} | {after:,} | "
+                    f"{ratio:.1f}x | {comp_tokens:,} |"
+                )
+            lines.extend(["", ""])
 
     # --- Per-task quality scores ---
     if judgments:
@@ -396,7 +527,7 @@ def _write_report(
             ]
         )
 
-        # Per-task table
+        # Per-task table per condition
         for cond in CONDITIONS:
             cond_scores = judgments.get(cond, [])
             if not cond_scores:
@@ -418,7 +549,6 @@ def _write_report(
                 note = s.get("notes", "")[:100]
                 lines.append(f"| {task_id} | {c} | {cr} | {a} | {note} |")
 
-            # Averages
             if cond_scores:
                 avg_c = sum(s.get("completeness", 0) for s in cond_scores) / len(
                     cond_scores
@@ -437,12 +567,17 @@ def _write_report(
             lines.extend(["", ""])
 
         # Cross-condition summary
+        header = "| Dimension |"
+        sep_row = "|-----------|"
+        for cond in CONDITIONS:
+            header += f" {cond_labels[cond]} |"
+            sep_row += "----------|"
         lines.extend(
             [
                 "### Summary Across Conditions",
                 "",
-                "| Dimension | agent-raw | agent-compressed | claude-p |",
-                "|-----------|-----------|-----------------|----------|",
+                header,
+                sep_row,
             ]
         )
         for dim in ["completeness", "correctness", "adherence"]:
@@ -475,6 +610,11 @@ def _write_report(
             "**Compression cost:** The compression call itself uses tokens. Net savings",
             "= (tokens saved on subsequent turns) - (compression call tokens).",
             "",
+            "**Prompt caching:** Cache reads cost 1/10th of input price. After",
+            "compression, the message cache is invalidated (system prompt cache",
+            "survives). The cost tradeoff: cache_creation costs 1.25x but subsequent",
+            "reads cost 0.1x. Net benefit depends on turns between compressions.",
+            "",
             "**claude-p comparison:** Claude Code's internal session management is a",
             "black box — we can't see per-turn tokens, only the total. The comparison",
             "shows whether our explicit compression beats Claude's built-in approach.",
@@ -492,7 +632,7 @@ def _write_report(
 
 def run_eval_agent(project_dir: str):
     """
-    Run the agent compression eval: 3 conditions, all tasks as mega-prompt.
+    Run the agent compression eval: 5 conditions, all tasks as mega-prompt.
     """
     project_dir = os.path.abspath(project_dir)
     eval_dir = os.path.join(project_dir, "eval")
@@ -554,17 +694,17 @@ def run_eval_agent(project_dir: str):
         # Reset codebase
         restore_state(project_dir, eval_dir)
 
-        if condition in ("agent-raw", "agent-compressed"):
-            cond_result = _run_agent_condition(
-                mega_prompt, project_dir, condition, condition_dir
-            )
-        elif condition == "claude-p":
+        if condition == "claude-p":
             # Try cached results from eval-compare first
             cond_result = _load_claude_p_from_cache(eval_dir)
             if cond_result is None:
                 cond_result = _run_claude_p_condition(
                     mega_prompt, queue, project_dir, condition_dir
                 )
+        else:
+            cond_result = _run_agent_condition(
+                mega_prompt, project_dir, condition, condition_dir
+            )
 
         print(
             f"\n  Result: {cond_result['status']} | "

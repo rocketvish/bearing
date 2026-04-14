@@ -44,7 +44,19 @@
       "Bash(command -v ruff.exe)",
       "Bash(C:/Users/Rocketfish/projects/bearing/.venv/Scripts/python.exe -m ensurepip)",
       "Bash(C:/Users/Rocketfish/projects/bearing/.venv/Scripts/ruff check:*)",
-      "Bash(C:/Users/Rocketfish/projects/bearing/.venv/Scripts/ruff format:*)"
+      "Bash(C:/Users/Rocketfish/projects/bearing/.venv/Scripts/ruff format:*)",
+      "Bash(where python3:*)",
+      "Bash(where py:*)",
+      "Bash(ls *.py)",
+      "Bash(py -m ruff check agent.py eval_agent.py test_sanity.py)",
+      "Bash(/c/Users/Rocketfish/AppData/Local/Programs/Python/Python312/python.exe --version)",
+      "Bash(/c/Users/Rocketfish/AppData/Local/Programs/Python/Python313/python.exe --version)",
+      "Bash(ls /c/Python3*/)",
+      "Read(//c/Users/Rocketfish/**)",
+      "Bash(ruff --version)",
+      "Bash(.venv/Scripts/ruff.exe check:*)",
+      "Bash(.venv/Scripts/ruff.exe format:*)",
+      "Bash(.venv/Scripts/python.exe test_sanity.py)"
     ]
   }
 }

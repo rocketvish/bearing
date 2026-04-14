@@ -7,9 +7,10 @@
 - `relevance.py` -- Embedding-based relevance scoring + compression via Ollama
 - `eval_runner.py` -- Evaluation framework: runs benchmark under 4 context format conditions
 - `eval_compare.py` -- Eval compare: Bearing (8 sessions) vs single session (1 mega-prompt)
-- `agent.py` -- Minimal tool-use agent via Anthropic API (urllib, no SDK)
+- `agent.py` -- Tool-use agent via Anthropic API (urllib, no SDK), with prompt caching + extended thinking
 - `compressor.py` -- Mid-conversation history compression (API or Ollama backends)
-- `eval_agent.py` -- Eval: agent with/without compression vs claude -p
+- `eval_agent.py` -- Eval: agent with/without compression/caching vs claude -p (5 conditions)
+- `test_sanity.py` -- Quick sanity test for caching + thinking features
 - `tasks_schema.py` -- Dataclasses for Task, TaskQueue, TaskResult
 - `status_writer.py` -- Generates status.md from task queue state
 
@@ -54,11 +55,33 @@ agent session (same methodology as eval-compare) to ensure enough context accumu
 (30K+ tokens) to trigger compression. Uses the Anthropic API directly via urllib with
 three tools (read_file, write_file, run_command).
 
-Three conditions: `agent-raw` (no compression, 80 turns), `agent-compressed` (API
-compression at 30K threshold, 80 turns), `claude-p` (loads cached results from
-eval-compare if available, otherwise runs fresh). Key output: per-turn input token
-table showing accumulation curve flattening after compression events. Per-task quality
-judging using the same judge infrastructure as the other evals.
+Five conditions: `agent-raw` (no compression, no caching), `agent-compressed` (API
+compression at 12K threshold), `agent-cached` (prompt caching, no compression),
+`agent-compressed-cached` (both compression + caching), `claude-p` (loads cached
+results from eval-compare if available, otherwise runs fresh). Key output: per-turn
+input token table showing accumulation curves, cache hit rates, and compression
+sawtooth. Per-task quality judging using the same judge infrastructure as the other
+evals. Report includes per-condition cost breakdowns with cached pricing.
+
+### Agent Features
+
+**Prompt caching** (`use_caching=True`): Formats system prompt as a content block
+array with `cache_control: {type: "ephemeral"}` and adds the `anthropic-beta:
+prompt-caching-2024-07-31` header. Cache reads cost 0.1x input price; cache creation
+costs 1.25x. After compression events, the message prefix cache is invalidated (system
+prompt cache survives). The `calculate_cost()` function handles all pricing tiers.
+
+**Extended thinking** (`use_thinking=True`): Adds `thinking: {type: "enabled",
+budget_tokens: 10000}` to API requests. Bumps `max_tokens` to 16000 to accommodate
+thinking budget + text output. Thinking and redacted_thinking blocks are preserved in
+conversation history (API requires them for continuity) but not acted upon. Thinking
+blocks are silently skipped during compression serialization.
+
+**Token tracking**: Per-turn metrics include `cache_read_tokens`,
+`cache_creation_tokens`, and `thinking_tokens`. The API's `input_tokens` field is the
+uncached portion; `total_input = input_tokens + cache_read + cache_creation`. Cost
+calculation uses the uncached portion at full price, cache reads at 0.1x, cache
+creation at 1.25x, and thinking at output price.
 
 ## Commands
 
@@ -67,7 +90,7 @@ bearing start <dir>         # Launch interactive planner session
 bearing run <dir>           # Execute task queue
 bearing eval <dir>          # Run 4-condition evaluation
 bearing eval-compare <dir>  # Bearing vs single session comparison
-bearing eval-agent <dir>    # Agent compression eval (task-001 only)
+bearing eval-agent <dir>    # Agent compression/caching eval (5 conditions)
 bearing status <dir>        # Show status
 bearing summary <dir>       # Quick check for planner
 bearing watch <dir>         # Live updates
