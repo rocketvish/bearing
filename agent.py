@@ -329,16 +329,6 @@ def _tool_write_file(path: str, content: str, project_dir: str) -> str:
         return f"Error writing {path}: {e}"
 
 
-_BLOCKED_COMMANDS = [
-    "node src/index.js",
-    "node index.js",
-    "npm start",
-    "node server.js",
-    "node src/server.js",
-    "node ./src/index.js",
-    "node ./index.js",
-]
-
 _BLOCKED_MSG = (
     "Blocked: server-starting commands are not allowed. "
     "Use npm test or node -e instead."
@@ -350,10 +340,10 @@ def _tool_run_command(command: str, project_dir: str) -> str:
     if not command:
         return "Error: no command provided"
     # Block server-starting commands
-    for pattern in _BLOCKED_COMMANDS:
-        if pattern in command:
-            return _BLOCKED_MSG
-    if "index.js" in command and "&" in command:
+    cmd_lower = command.lower()
+    if "index.js" in cmd_lower and "test" not in cmd_lower:
+        return _BLOCKED_MSG
+    if "npm start" in cmd_lower or "node server.js" in cmd_lower:
         return _BLOCKED_MSG
     try:
         result = subprocess.run(
