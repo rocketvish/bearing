@@ -486,6 +486,52 @@ def run_orchestrator(project_dir: str, format_override: str = None):
         time.sleep(2)
 
 
+def run_agent_single(project_dir: str):
+    """
+    Run the tool-use agent once on the eval mega-prompt and save a JSONL
+    transcript. No conditions, no judging, no codebase reset.
+    """
+    project_dir = os.path.abspath(project_dir)
+    eval_dir = os.path.join(project_dir, "eval")
+    tasks_orig = os.path.join(eval_dir, "tasks_original.json")
+
+    if not os.path.exists(tasks_orig):
+        print(f"Error: {tasks_orig} not found")
+        print("Run `bearing eval` or `bearing eval-compare` first to create it.")
+        sys.exit(1)
+
+    from eval_compare import build_mega_prompt
+    from agent import run_agent
+
+    queue = TaskQueue.load(tasks_orig)
+    mega_prompt = build_mega_prompt(queue)
+    transcript_path = os.path.join(eval_dir, "transcript.jsonl")
+
+    print("Bearing -- agent-run")
+    print(f"Project: {project_dir}")
+    print(f"Tasks: {len(queue.tasks)} (mega-prompt, {len(mega_prompt)} chars)")
+    print(f"Transcript: {transcript_path}")
+    print()
+
+    result = run_agent(
+        task_prompt=mega_prompt,
+        project_dir=project_dir,
+        max_turns=80,
+        compression_mode="none",
+        use_caching=False,
+        transcript_path=transcript_path,
+    )
+
+    print()
+    print(f"Status:        {result['status']}")
+    print(f"Turns used:    {result['turns_used']}")
+    print(f"Input tokens:  {result['total_input_tokens']:,}")
+    print(f"Output tokens: {result['total_output_tokens']:,}")
+    print(f"Cost:          ${result['cost_usd']:.4f}")
+    print(f"Wall time:     {result['wall_time_s']}s")
+    print(f"Transcript:    {transcript_path}")
+
+
 def show_status(project_dir: str):
     """Print current status to terminal."""
     tasks_path = os.path.join(project_dir, TASKS_FILE)
@@ -651,6 +697,7 @@ def print_usage():
     print("  bearing eval <project_dir>       Run evaluation (4 conditions)")
     print("  bearing eval-compare <dir>       Bearing vs single session")
     print("  bearing eval-agent <dir>         Agent compression eval")
+    print("  bearing agent-run <dir>          Run agent once, save transcript.jsonl")
     print("  bearing status <project_dir>     Show full status")
     print("  bearing summary <project_dir>    Quick check (for planner)")
     print("  bearing watch <project_dir>      Live updates as tasks run")
@@ -726,6 +773,8 @@ def main():
         from eval_agent import run_eval_agent
 
         run_eval_agent(project_dir)
+    elif command == "agent-run":
+        run_agent_single(project_dir)
     elif command in simple_commands:
         if format_override:
             print("Note: --format only applies to 'bearing run'")

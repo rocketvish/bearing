@@ -387,6 +387,7 @@ def run_agent(
     retrieval_top_k: int = 5,
     use_caching: bool = False,
     use_thinking: bool = False,
+    transcript_path: str | None = None,
 ) -> dict:
     """
     Run a tool-use agent loop to complete a coding task.
@@ -402,6 +403,8 @@ def run_agent(
         retrieval_top_k: Number of turns to retrieve in "retrieval" mode
         use_caching: Enable prompt caching (cache system prompt)
         use_thinking: Enable extended thinking (budget: 10K tokens)
+        transcript_path: If set, write full conversation as JSONL to this path
+            (one message dict per line, system prompt first)
 
     Returns:
         Dict with status, summary, token counts, cost, timing, etc.
@@ -522,8 +525,9 @@ def run_agent(
             elif block.get("type") == "tool_use":
                 tool_calls.append(block)
 
-        # If no tool calls, agent is done
+        # If no tool calls, agent is done — record the final assistant turn
         if response.get("stop_reason") == "end_turn" or not tool_calls:
+            messages.append({"role": "assistant", "content": content})
             break
 
         # Execute tools and build tool_result messages
@@ -634,6 +638,18 @@ def run_agent(
         total_cache_creation,
         total_thinking,
     )
+
+    if transcript_path:
+        try:
+            parent = os.path.dirname(transcript_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(transcript_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"role": "system", "content": SYSTEM_PROMPT}) + "\n")
+                for msg in messages:
+                    f.write(json.dumps(msg) + "\n")
+        except OSError as e:
+            print(f"  Warning: failed to write transcript {transcript_path}: {e}")
 
     return {
         "status": status,

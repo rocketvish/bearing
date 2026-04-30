@@ -56,7 +56,14 @@
       "Bash(ruff --version)",
       "Bash(.venv/Scripts/ruff.exe check:*)",
       "Bash(.venv/Scripts/ruff.exe format:*)",
-      "Bash(.venv/Scripts/python.exe test_sanity.py)"
+      "Bash(.venv/Scripts/python.exe test_sanity.py)",
+      "Bash(.venv/Scripts/python.exe -c \"from retriever import TurnRetriever; print\\('retriever import OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"from agent import run_agent; print\\('agent import OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"from eval_agent import CONDITIONS; print\\(f'eval_agent import OK, {len\\(CONDITIONS\\)} conditions: {CONDITIONS}'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import retriever; print\\(retriever.__file__\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import compressor; print\\(compressor.__file__\\)\")",
+      "Bash(.venv/Scripts/pip.exe show:*)",
+      "Bash(.venv/Scripts/python.exe:*)"
     ]
   }
 }
