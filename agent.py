@@ -1,14 +1,14 @@
 """
 Bearing - Minimal code agent with tool use
 
-A tool-use agent loop using the Anthropic API directly via urllib.
-Supports mid-conversation context compression to reduce token
-accumulation across turns.
+A provider-agnostic tool-use agent loop using API calls directly via urllib.
+Supports OpenAI Responses and Anthropic Messages backends, plus
+mid-conversation context compression to reduce token accumulation across turns.
 
 Tools:
-    read_file(path)      — Read a file relative to the working directory
-    write_file(path, content) — Write a file, creating parent dirs
-    run_command(command)  — Run a shell command with 30s timeout
+    read_file(path)      - Read a file relative to the working directory
+    write_file(path, content) - Write a file, creating parent dirs
+    run_command(command)  - Run a shell command with 30s timeout
 """
 
 import json
@@ -18,14 +18,22 @@ import time
 import urllib.error
 import urllib.request
 
+OPENAI_RESPONSES_API_URL = "https://api.openai.com/v1/responses"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
+
+DEFAULT_PROVIDER = "openai"
+DEFAULT_MODELS = {
+    "openai": "gpt-5.5",
+    "anthropic": "claude-sonnet-4-20250514",
+}
+DEFAULT_MODEL = DEFAULT_MODELS[DEFAULT_PROVIDER]
 
 SYSTEM_PROMPT = (
     "You are a coding agent. You have access to three tools: read_file, "
     "write_file, and run_command. Complete the given task by reading existing "
     "files, writing new files, and running commands as needed. Work efficiently "
-    "— read only the files you need, and don't re-read files you've already "
+    "- read only the files you need, and don't re-read files you've already "
     "seen unless they've changed. When you're done, respond with a brief "
     "summary of what you built. "
     "NEVER run commands that start servers or long-running processes "
@@ -34,14 +42,14 @@ SYSTEM_PROMPT = (
     "their own like npm test, node -e, or ls."
 )
 
-TOOL_DEFINITIONS = [
+BASE_TOOL_DEFINITIONS = [
     {
         "name": "read_file",
         "description": (
             "Read the contents of a file at the given path "
             "relative to the working directory"
         ),
-        "input_schema": {
+        "schema": {
             "type": "object",
             "properties": {
                 "path": {
@@ -50,6 +58,7 @@ TOOL_DEFINITIONS = [
                 }
             },
             "required": ["path"],
+            "additionalProperties": False,
         },
     },
     {
@@ -58,7 +67,7 @@ TOOL_DEFINITIONS = [
             "Write content to a file at the given path relative to the "
             "working directory. Creates parent directories if needed."
         ),
-        "input_schema": {
+        "schema": {
             "type": "object",
             "properties": {
                 "path": {
@@ -71,6 +80,7 @@ TOOL_DEFINITIONS = [
                 },
             },
             "required": ["path", "content"],
+            "additionalProperties": False,
         },
     },
     {
@@ -79,7 +89,7 @@ TOOL_DEFINITIONS = [
             "Run a shell command and return stdout+stderr. "
             "Has a 30-second timeout. Output truncated to 5000 chars."
         ),
-        "input_schema": {
+        "schema": {
             "type": "object",
             "properties": {
                 "command": {
@@ -88,15 +98,108 @@ TOOL_DEFINITIONS = [
                 }
             },
             "required": ["command"],
+            "additionalProperties": False,
         },
     },
 ]
 
-# Sonnet pricing (per MTok)
-COST_INPUT_PER_MTOK = 3.0
-COST_OUTPUT_PER_MTOK = 15.0
-COST_CACHE_READ_PER_MTOK = 0.30
-COST_CACHE_CREATION_PER_MTOK = 3.75
+MODEL_PRICING = {
+    # Prices per 1M tokens. OpenAI output tokens include reasoning tokens.
+    ("openai", "gpt-5.5"): {
+        "input": 5.0,
+        "cached_input": 0.50,
+        "cache_creation": 0.0,
+        "output": 30.0,
+        "reasoning_billed_separately": False,
+    },
+    ("openai", "gpt-5.4-mini"): {
+        "input": 0.75,
+        "cached_input": 0.075,
+        "cache_creation": 0.0,
+        "output": 4.50,
+        "reasoning_billed_separately": False,
+    },
+    ("anthropic", "claude-sonnet-4-20250514"): {
+        "input": 3.0,
+        "cached_input": 0.30,
+        "cache_creation": 3.75,
+        "output": 15.0,
+        "reasoning_billed_separately": True,
+    },
+}
+
+# Backward-compatible constants used by eval reporting. These reflect the
+# default OpenAI model; provider-specific runs should use calculate_cost().
+COST_INPUT_PER_MTOK = MODEL_PRICING[(DEFAULT_PROVIDER, DEFAULT_MODEL)]["input"]
+COST_OUTPUT_PER_MTOK = MODEL_PRICING[(DEFAULT_PROVIDER, DEFAULT_MODEL)]["output"]
+COST_CACHE_READ_PER_MTOK = MODEL_PRICING[(DEFAULT_PROVIDER, DEFAULT_MODEL)][
+    "cached_input"
+]
+COST_CACHE_CREATION_PER_MTOK = MODEL_PRICING[(DEFAULT_PROVIDER, DEFAULT_MODEL)][
+    "cache_creation"
+]
+
+
+def _normalize_provider(provider: str | None) -> str:
+    value = (provider or DEFAULT_PROVIDER).lower()
+    aliases = {
+        "responses": "openai",
+        "openai-responses": "openai",
+        "anthropic-messages": "anthropic",
+    }
+    value = aliases.get(value, value)
+    if value not in DEFAULT_MODELS:
+        raise ValueError(
+            f"unsupported provider '{provider}'. "
+            f"Expected one of: {', '.join(DEFAULT_MODELS)}"
+        )
+    return value
+
+
+def _format_tools(provider: str) -> list[dict]:
+    """Format neutral tool specs for the target provider."""
+    tools = []
+    for tool in BASE_TOOL_DEFINITIONS:
+        if provider == "openai":
+            tools.append(
+                {
+                    "type": "function",
+                    "name": tool["name"],
+                    "description": tool["description"],
+                    "parameters": tool["schema"],
+                    "strict": True,
+                }
+            )
+        elif provider == "anthropic":
+            schema = {
+                key: value
+                for key, value in tool["schema"].items()
+                if key != "additionalProperties"
+            }
+            tools.append(
+                {
+                    "name": tool["name"],
+                    "description": tool["description"],
+                    "input_schema": schema,
+                }
+            )
+    return tools
+
+
+TOOL_DEFINITIONS = _format_tools(DEFAULT_PROVIDER)
+
+
+def _pricing_for(provider: str, model: str) -> dict:
+    return MODEL_PRICING.get(
+        (provider, model),
+        MODEL_PRICING.get((provider, DEFAULT_MODELS[provider])),
+    )
+
+
+def pricing_for(provider: str = DEFAULT_PROVIDER, model: str | None = None) -> dict:
+    """Return the pricing table entry used for approximate cost calculations."""
+    provider = _normalize_provider(provider)
+    return dict(_pricing_for(provider, model or DEFAULT_MODELS[provider]))
 
 
 def calculate_cost(
@@ -105,57 +208,68 @@ def calculate_cost(
     cache_read: int = 0,
     cache_creation: int = 0,
     thinking: int = 0,
+    provider: str = DEFAULT_PROVIDER,
+    model: str | None = None,
 ) -> float:
     """
-    Calculate cost with cached and thinking token pricing.
-    input_tokens is the uncached portion from the API.
+    Calculate approximate cost with provider-specific cache/reasoning pricing.
+    input_tokens is the uncached portion derived from API usage totals.
     """
+    provider = _normalize_provider(provider)
+    model = model or DEFAULT_MODELS[provider]
+    pricing = _pricing_for(provider, model)
+    billed_output = output_tokens
+    if pricing.get("reasoning_billed_separately", False):
+        billed_output += thinking
     return (
-        input_tokens * COST_INPUT_PER_MTOK / 1_000_000
-        + cache_read * COST_CACHE_READ_PER_MTOK / 1_000_000
-        + cache_creation * COST_CACHE_CREATION_PER_MTOK / 1_000_000
-        + (output_tokens + thinking) * COST_OUTPUT_PER_MTOK / 1_000_000
+        input_tokens * pricing["input"] / 1_000_000
+        + cache_read * pricing["cached_input"] / 1_000_000
+        + cache_creation * pricing["cache_creation"] / 1_000_000
+        + billed_output * pricing["output"] / 1_000_000
     )
 
 
-def load_api_key(project_dir: str = ".") -> str | None:
+def _read_env_file_key(project_dir: str, env_name: str) -> str | None:
+    env_path = os.path.join(project_dir, ".env")
+    if not os.path.exists(env_path):
+        print(f"Note: No .env file at {env_path}")
+        return None
+
+    for encoding in ("utf-8-sig", "utf-16"):
+        try:
+            with open(env_path, "r", encoding=encoding) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith(f"{env_name}="):
+                        val = line.split("=", 1)[1].strip()
+                        if (
+                            len(val) >= 2
+                            and val[0] in ('"', "'")
+                            and val[-1] == val[0]
+                        ):
+                            val = val[1:-1]
+                        if val:
+                            return val
+            break
+        except UnicodeDecodeError:
+            continue
+        except OSError:
+            break
+    print(f"Warning: .env file found at {env_path} but no {env_name} in it")
+    return None
+
+
+def load_api_key(project_dir: str = ".", provider: str = DEFAULT_PROVIDER) -> str | None:
     """
-    Load Anthropic API key from environment or .env file.
+    Load provider API key from environment or .env file.
     Returns None if not found.
     """
-    key = os.environ.get("ANTHROPIC_API_KEY")
+    provider = _normalize_provider(provider)
+    env_name = "OPENAI_API_KEY" if provider == "openai" else "ANTHROPIC_API_KEY"
+    key = os.environ.get(env_name)
     if key:
         return key
-
-    env_path = os.path.join(project_dir, ".env")
-    if os.path.exists(env_path):
-        # utf-8-sig strips BOM from PowerShell's "UTF8" encoding; fall back to UTF-16
-        for encoding in ("utf-8-sig", "utf-16"):
-            try:
-                with open(env_path, "r", encoding=encoding) as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith("ANTHROPIC_API_KEY="):
-                            val = line.split("=", 1)[1].strip()
-                            # Strip quotes if present
-                            if (
-                                len(val) >= 2
-                                and val[0] in ('"', "'")
-                                and val[-1] == val[0]
-                            ):
-                                val = val[1:-1]
-                            if val:
-                                return val
-                break  # File read successfully, no need to try next encoding
-            except UnicodeDecodeError:
-                continue
-            except OSError:
-                break
-        print(f"Warning: .env file found at {env_path} but no ANTHROPIC_API_KEY in it")
-    else:
-        print(f"Note: No .env file at {env_path}")
-
-    return None
+    return _read_env_file_key(project_dir, env_name)
 
 
 def _call_api(
@@ -167,13 +281,134 @@ def _call_api(
     max_tokens: int = 4096,
     use_caching: bool = False,
     use_thinking: bool = False,
+    reasoning_effort: str | None = None,
+    provider: str = DEFAULT_PROVIDER,
 ) -> dict:
     """
-    Send a request to the Anthropic Messages API.
+    Send a request to the configured model API.
     Returns the parsed response dict.
     Raises RuntimeError on API errors.
     """
-    # Format system prompt: array with cache_control when caching, plain string otherwise
+    provider = _normalize_provider(provider)
+    if provider == "openai":
+        return _call_openai_api(
+            messages=messages,
+            model=model,
+            api_key=api_key,
+            system=system,
+            tools=tools,
+            max_tokens=max_tokens,
+            use_caching=use_caching,
+            use_thinking=use_thinking,
+            reasoning_effort=reasoning_effort,
+        )
+    if provider == "anthropic":
+        return _call_anthropic_api(
+            messages=messages,
+            model=model,
+            api_key=api_key,
+            system=system,
+            tools=tools,
+            max_tokens=max_tokens,
+            use_caching=use_caching,
+            use_thinking=use_thinking,
+            reasoning_effort=reasoning_effort,
+        )
+    raise AssertionError(f"unhandled provider: {provider}")
+
+
+def _open_urlopen_json(
+    url: str,
+    payload: bytes,
+    headers: dict,
+    error_prefix: str,
+    timeout: int = 300,
+) -> dict:
+    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    max_retries = 3
+    for attempt in range(max_retries + 1):
+        try:
+            if attempt > 0:
+                req = urllib.request.Request(
+                    url, data=payload, headers=headers, method="POST"
+                )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504, 529) and attempt < max_retries:
+                retry_after = e.headers.get("retry-after")
+                wait = int(retry_after) if retry_after else min(60, 2**attempt * 5)
+                print(
+                    f"  API transient error ({e.code}), waiting {wait}s... "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+                time.sleep(wait)
+                continue
+            error_body = e.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"{error_prefix} {e.code}: {error_body[:500]}") from None
+        except urllib.error.URLError as e:
+            if attempt < max_retries:
+                wait = min(60, 2**attempt * 5)
+                print(
+                    f"  API connection error ({e.reason}), waiting {wait}s... "
+                    f"(attempt {attempt + 1}/{max_retries})"
+                )
+                time.sleep(wait)
+                continue
+            raise RuntimeError(f"{error_prefix} connection error: {e.reason}") from None
+    raise RuntimeError(f"{error_prefix}: retry loop exhausted")
+
+
+def _call_openai_api(
+    messages: list[dict],
+    model: str,
+    api_key: str,
+    system: str,
+    tools: list[dict] | None,
+    max_tokens: int,
+    use_caching: bool,
+    use_thinking: bool,
+    reasoning_effort: str | None,
+) -> dict:
+    body = {
+        "model": model,
+        "instructions": system,
+        "input": messages,
+        "max_output_tokens": max_tokens,
+        "store": False,
+    }
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+    if use_caching:
+        body["prompt_cache_retention"] = "24h"
+    effort = reasoning_effort or ("high" if use_thinking else None)
+    if effort:
+        body["reasoning"] = {"effort": effort}
+
+    return _open_urlopen_json(
+        OPENAI_RESPONSES_API_URL,
+        json.dumps(body).encode("utf-8"),
+        {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        "OpenAI API error",
+    )
+
+
+def _call_anthropic_api(
+    messages: list[dict],
+    model: str,
+    api_key: str,
+    system: str,
+    tools: list[dict] | None,
+    max_tokens: int,
+    use_caching: bool,
+    use_thinking: bool,
+    reasoning_effort: str | None,
+) -> dict:
+    system_value: str | list[dict]
     if use_caching:
         system_value = [
             {
@@ -193,7 +428,6 @@ def _call_api(
     }
     if tools:
         if use_caching:
-            # Cache breakpoint on last tool: caches system + tools prefix
             cached_tools = list(tools)
             cached_tools[-1] = {
                 **cached_tools[-1],
@@ -202,15 +436,11 @@ def _call_api(
             body["tools"] = cached_tools
         else:
             body["tools"] = tools
-    if use_thinking:
+    if use_thinking or reasoning_effort:
         body["thinking"] = {"type": "enabled", "budget_tokens": 10000}
-        # max_tokens must accommodate thinking budget + text/tool output
         if body["max_tokens"] < 16000:
             body["max_tokens"] = 16000
 
-    # Cache breakpoint on last message: caches entire conversation prefix.
-    # This is the key optimization — on turn N, system + tools + all messages
-    # from turns 1..N-1 hit the cache. Only the new tool results are uncached.
     if use_caching and messages:
         cached_messages = list(messages)
         last_msg = {**cached_messages[-1]}
@@ -233,51 +463,144 @@ def _call_api(
         cached_messages[-1] = last_msg
         body["messages"] = cached_messages
 
-    payload = json.dumps(body).encode("utf-8")
-
-    headers = {
-        "Content-Type": "application/json",
-        "x-api-key": api_key,
-        "anthropic-version": ANTHROPIC_API_VERSION,
-    }
-    if use_caching:
-        headers["anthropic-beta"] = "prompt-caching-2024-07-31"
-
-    req = urllib.request.Request(
+    return _open_urlopen_json(
         ANTHROPIC_API_URL,
-        data=payload,
-        headers=headers,
-        method="POST",
+        json.dumps(body).encode("utf-8"),
+        {
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": ANTHROPIC_API_VERSION,
+            **({"anthropic-beta": "prompt-caching-2024-07-31"} if use_caching else {}),
+        },
+        "Anthropic API error",
     )
 
-    max_retries = 3
-    for attempt in range(max_retries + 1):
-        try:
-            # Request object is consumed after use, rebuild on retry
-            if attempt > 0:
-                req = urllib.request.Request(
-                    ANTHROPIC_API_URL,
-                    data=payload,
-                    headers=headers,
-                    method="POST",
+
+def _usage_counts(usage: dict, provider: str) -> tuple[int, int, int, int, int]:
+    """
+    Normalize provider usage fields.
+    Returns total_input, output, cache_read, cache_creation, reasoning_tokens.
+    """
+    if provider == "anthropic":
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        cache_read = usage.get("cache_read_input_tokens", 0)
+        cache_creation = usage.get("cache_creation_input_tokens", 0)
+        thinking_tokens = usage.get("thinking_tokens", 0)
+        return (
+            input_tokens + cache_read + cache_creation,
+            output_tokens,
+            cache_read,
+            cache_creation,
+            thinking_tokens,
+        )
+
+    input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0))
+    output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0))
+    input_details = usage.get("input_tokens_details") or usage.get(
+        "prompt_tokens_details", {}
+    )
+    output_details = usage.get("output_tokens_details") or usage.get(
+        "completion_tokens_details", {}
+    )
+    cache_read = input_details.get("cached_tokens", 0)
+    reasoning_tokens = output_details.get(
+        "reasoning_tokens", usage.get("reasoning_tokens", 0)
+    )
+    return input_tokens, output_tokens, cache_read, 0, reasoning_tokens
+
+
+def _extract_openai_text(response: dict) -> str:
+    text = response.get("output_text", "")
+    if text:
+        return text
+
+    parts = []
+    for item in response.get("output", []):
+        if item.get("type") == "message":
+            for block in item.get("content", []):
+                if block.get("type") in ("output_text", "text"):
+                    parts.append(block.get("text", ""))
+    return "".join(parts)
+
+
+def _extract_anthropic_text(response: dict) -> str:
+    parts = []
+    for block in response.get("content", []):
+        if block.get("type") == "text":
+            parts.append(block.get("text", ""))
+    return "".join(parts)
+
+
+def _parse_tool_arguments(raw_arguments: object) -> dict:
+    """Parse function arguments, tolerating malformed model output."""
+    if isinstance(raw_arguments, dict):
+        return raw_arguments
+    if not isinstance(raw_arguments, str) or not raw_arguments.strip():
+        return {}
+    try:
+        value = json.loads(raw_arguments)
+    except json.JSONDecodeError:
+        return {"_raw_arguments": raw_arguments}
+    return value if isinstance(value, dict) else {"_value": value}
+
+
+def _normalize_response(
+    response: dict,
+    provider: str,
+) -> tuple[list[dict], list[dict], str, str]:
+    """
+    Normalize provider response into appendable message items, tool calls,
+    final text, and a status label.
+    """
+    if provider == "anthropic":
+        content = response.get("content", [])
+        tool_calls = []
+        for block in content:
+            if block.get("type") == "tool_use":
+                tool_calls.append(
+                    {
+                        "name": block.get("name", ""),
+                        "input": block.get("input", {}),
+                        "call_id": block.get("id", ""),
+                    }
                 )
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            if e.code in (429, 529) and attempt < max_retries:
-                retry_after = e.headers.get("retry-after")
-                wait = int(retry_after) if retry_after else 60
-                reason = "Rate limited" if e.code == 429 else "Server overloaded"
-                print(
-                    f"  {reason} ({e.code}), waiting {wait}s... "
-                    f"(attempt {attempt + 1}/{max_retries})"
-                )
-                time.sleep(wait)
-                continue
-            error_body = e.read().decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"Anthropic API error {e.code}: {error_body[:500]}"
-            ) from None
+        return (
+            [{"role": "assistant", "content": content}],
+            tool_calls,
+            _extract_anthropic_text(response),
+            response.get("stop_reason", "?"),
+        )
+
+    output_items = response.get("output", [])
+    tool_calls = []
+    for item in output_items:
+        if item.get("type") != "function_call":
+            continue
+        tool_calls.append(
+            {
+                "name": item.get("name", ""),
+                "input": _parse_tool_arguments(item.get("arguments", "{}")),
+                "call_id": item.get("call_id", ""),
+            }
+        )
+    return output_items, tool_calls, _extract_openai_text(response), response.get(
+        "status", "?"
+    )
+
+
+def _build_tool_output_item(provider: str, call_id: str, result_text: str) -> dict:
+    if provider == "anthropic":
+        return {
+            "type": "tool_result",
+            "tool_use_id": call_id,
+            "content": result_text,
+        }
+    return {
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": result_text,
+    }
 
 
 # --- Tool Execution ---
@@ -285,6 +608,8 @@ def _call_api(
 
 def _execute_tool(name: str, input_data: dict, project_dir: str) -> str:
     """Execute a tool call and return the result string."""
+    if "_raw_arguments" in input_data:
+        return f"Error: invalid JSON arguments: {input_data['_raw_arguments']}"
     if name == "read_file":
         return _tool_read_file(input_data.get("path", ""), project_dir)
     elif name == "write_file":
@@ -299,11 +624,32 @@ def _execute_tool(name: str, input_data: dict, project_dir: str) -> str:
         return f"Error: unknown tool '{name}'"
 
 
+def _resolve_project_path(path: str, project_dir: str) -> tuple[str | None, str | None]:
+    """Resolve a model-supplied relative path and keep it inside project_dir."""
+    if not path:
+        return None, "Error: no path provided"
+    if os.path.isabs(path):
+        return None, "Error: absolute paths are not allowed"
+
+    project_root = os.path.realpath(project_dir)
+    full_path = os.path.realpath(os.path.join(project_root, path))
+    try:
+        common = os.path.commonpath(
+            [os.path.normcase(project_root), os.path.normcase(full_path)]
+        )
+    except ValueError:
+        return None, f"Error: path escapes project directory: {path}"
+
+    if common != os.path.normcase(project_root):
+        return None, f"Error: path escapes project directory: {path}"
+    return full_path, None
+
+
 def _tool_read_file(path: str, project_dir: str) -> str:
     """Read a file relative to project_dir."""
-    if not path:
-        return "Error: no path provided"
-    full_path = os.path.join(project_dir, path)
+    full_path, error = _resolve_project_path(path, project_dir)
+    if error:
+        return error
     try:
         with open(full_path, "r", encoding="utf-8") as f:
             return f.read()
@@ -315,9 +661,9 @@ def _tool_read_file(path: str, project_dir: str) -> str:
 
 def _tool_write_file(path: str, content: str, project_dir: str) -> str:
     """Write content to a file relative to project_dir."""
-    if not path:
-        return "Error: no path provided"
-    full_path = os.path.join(project_dir, path)
+    full_path, error = _resolve_project_path(path, project_dir)
+    if error:
+        return error
     try:
         parent = os.path.dirname(full_path)
         if parent:
@@ -334,13 +680,33 @@ _BLOCKED_MSG = (
     "Use npm test or node -e instead."
 )
 
+_DESTRUCTIVE_COMMAND_PATTERNS = [
+    " rm -rf",
+    " rm -fr",
+    "rm -rf ",
+    "rm -fr ",
+    "del /s",
+    "rmdir /s",
+    "remove-item",
+    "git reset",
+    "git clean",
+    "mkfs",
+    "format.com",
+    ":(){",
+]
+
 
 def _tool_run_command(command: str, project_dir: str) -> str:
     """Run a shell command with 30s timeout, truncate output to 5000 chars."""
     if not command:
         return "Error: no command provided"
-    # Block server-starting commands
     cmd_lower = command.lower()
+    padded_cmd = f" {cmd_lower} "
+    if any(pattern in padded_cmd for pattern in _DESTRUCTIVE_COMMAND_PATTERNS):
+        return (
+            "Blocked: destructive commands are not allowed through run_command. "
+            "Use focused test, lint, or inspection commands instead."
+        )
     if "index.js" in cmd_lower and "test" not in cmd_lower:
         return _BLOCKED_MSG
     if "npm start" in cmd_lower or "node server.js" in cmd_lower:
@@ -373,13 +739,35 @@ def _tool_run_command(command: str, project_dir: str) -> str:
         return f"Error running command: {e}"
 
 
+def _empty_result(status: str, summary: str) -> dict:
+    return {
+        "status": status,
+        "summary": summary,
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "total_cache_read_tokens": 0,
+        "total_cache_creation_tokens": 0,
+        "total_thinking_tokens": 0,
+        "turns_used": 0,
+        "per_turn_input_tokens": [],
+        "per_turn_output_tokens": [],
+        "per_turn_cache_read_tokens": [],
+        "per_turn_cache_creation_tokens": [],
+        "per_turn_thinking_tokens": [],
+        "compressions": [],
+        "retrievals": [],
+        "cost_usd": 0.0,
+        "wall_time_s": 0.0,
+    }
+
+
 # --- Agent Loop ---
 
 
 def run_agent(
     task_prompt: str,
     project_dir: str,
-    model: str = "claude-sonnet-4-20250514",
+    model: str | None = None,
     max_turns: int = 30,
     compression_mode: str = "none",
     compression_threshold: int = 30000,
@@ -387,6 +775,8 @@ def run_agent(
     retrieval_top_k: int = 5,
     use_caching: bool = False,
     use_thinking: bool = False,
+    reasoning_effort: str | None = None,
+    provider: str = DEFAULT_PROVIDER,
     transcript_path: str | None = None,
 ) -> dict:
     """
@@ -395,45 +785,46 @@ def run_agent(
     Args:
         task_prompt: The task for the agent to complete
         project_dir: Working directory for file operations
-        model: Anthropic model ID
+        model: Provider model ID. Defaults by provider if omitted.
         max_turns: Maximum conversation turns
         compression_mode: "none", "api", "ollama", or "retrieval"
         compression_threshold: Compress when total input tokens exceeds this
         compression_model: Ollama model for "ollama" compression mode
         retrieval_top_k: Number of turns to retrieve in "retrieval" mode
-        use_caching: Enable prompt caching (cache system prompt)
-        use_thinking: Enable extended thinking (budget: 10K tokens)
-        transcript_path: If set, write full conversation as JSONL to this path
-            (one message dict per line, system prompt first)
+        use_caching: Enable provider-specific prompt caching
+        use_thinking: Backward-compatible alias for high reasoning/thinking effort
+        reasoning_effort: Optional OpenAI effort ("low", "medium", "high")
+        provider: "openai" or "anthropic"
+        transcript_path: If set, write full input history as JSONL to this path
+            (one item dict per line, system prompt first)
 
     Returns:
         Dict with status, summary, token counts, cost, timing, etc.
     """
     project_dir = os.path.abspath(project_dir)
-    api_key = load_api_key(project_dir)
+    try:
+        provider = _normalize_provider(provider)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return _empty_result("error", str(e))
+
+    if (
+        provider == "openai"
+        and reasoning_effort is not None
+        and reasoning_effort not in {"low", "medium", "high"}
+    ):
+        print("Error: reasoning_effort must be one of: low, medium, high")
+        return _empty_result("error", "Invalid reasoning_effort")
+
+    model = model or os.environ.get("BEARING_AGENT_MODEL") or DEFAULT_MODELS[provider]
+    api_key = load_api_key(project_dir, provider)
     if not api_key:
-        print("Error: ANTHROPIC_API_KEY not found in environment or .env file")
-        return {
-            "status": "error",
-            "summary": "No API key",
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_cache_read_tokens": 0,
-            "total_cache_creation_tokens": 0,
-            "total_thinking_tokens": 0,
-            "turns_used": 0,
-            "per_turn_input_tokens": [],
-            "per_turn_output_tokens": [],
-            "per_turn_cache_read_tokens": [],
-            "per_turn_cache_creation_tokens": [],
-            "per_turn_thinking_tokens": [],
-            "compressions": [],
-            "retrievals": [],
-            "cost_usd": 0.0,
-            "wall_time_s": 0.0,
-        }
+        env_name = "OPENAI_API_KEY" if provider == "openai" else "ANTHROPIC_API_KEY"
+        print(f"Error: {env_name} not found in environment or .env file")
+        return _empty_result("error", "No API key")
 
     messages = [{"role": "user", "content": task_prompt}]
+    tools = _format_tools(provider)
     per_turn_input = []
     per_turn_output = []
     per_turn_cache_read = []
@@ -445,7 +836,6 @@ def run_agent(
     status = "completed"
     just_compressed = False
 
-    # Initialize retriever if using retrieval mode
     retriever = None
     if compression_mode == "retrieval":
         from retriever import TurnRetriever
@@ -455,15 +845,16 @@ def run_agent(
     t_start = time.time()
 
     for turn in range(max_turns):
-        # Call the API
         try:
             response = _call_api(
                 messages=messages,
                 model=model,
                 api_key=api_key,
-                tools=TOOL_DEFINITIONS,
+                tools=tools,
                 use_caching=use_caching,
                 use_thinking=use_thinking,
+                reasoning_effort=reasoning_effort,
+                provider=provider,
             )
         except RuntimeError as e:
             print(f"  API error on turn {turn + 1}: {e}")
@@ -471,16 +862,14 @@ def run_agent(
             final_text = str(e)
             break
 
-        # Track token usage
         usage = response.get("usage", {})
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
-        cache_read = usage.get("cache_read_input_tokens", 0)
-        cache_creation = usage.get("cache_creation_input_tokens", 0)
-        thinking_tokens = usage.get("thinking_tokens", 0)
-
-        # Total input includes all categories (uncached + cache_read + cache_creation)
-        total_input_this_turn = input_tokens + cache_read + cache_creation
+        (
+            total_input_this_turn,
+            output_tokens,
+            cache_read,
+            cache_creation,
+            thinking_tokens,
+        ) = _usage_counts(usage, provider)
 
         per_turn_input.append(total_input_this_turn)
         per_turn_output.append(output_tokens)
@@ -488,77 +877,74 @@ def run_agent(
         per_turn_cache_creation.append(cache_creation)
         per_turn_thinking.append(thinking_tokens)
 
-        # Print full usage on first two turns for debugging cache behavior
         if turn < 2:
             print(f"  [DEBUG] Turn {turn + 1} usage: {usage}")
             if turn == 0 and use_caching:
-                print(
-                    "  [DEBUG] Caching enabled: system=content_block_array, "
-                    "beta_header=prompt-caching-2024-07-31, "
-                    "cache_breakpoints=system+last_tool+last_message"
-                )
+                if provider == "openai":
+                    print(
+                        "  [DEBUG] Caching enabled: OpenAI automatic prompt cache, "
+                        "prompt_cache_retention=24h"
+                    )
+                else:
+                    print(
+                        "  [DEBUG] Caching enabled: Anthropic cache_control "
+                        "breakpoints"
+                    )
 
-        # Build status line
+        append_items, tool_calls, response_text, status_label = _normalize_response(
+            response, provider
+        )
+        final_text = response_text or final_text
+
         parts = [f"  Turn {turn + 1}: {total_input_this_turn:,} in"]
         if use_caching:
             parts[0] += f" ({cache_read:,} cached)"
         parts.append(f" / {output_tokens:,} out")
-        if use_thinking and thinking_tokens > 0:
-            parts.append(f" ({thinking_tokens:,} thinking)")
+        if (use_thinking or reasoning_effort) and thinking_tokens > 0:
+            parts.append(f" ({thinking_tokens:,} reasoning)")
         note = ""
         if just_compressed:
             note = " [cache reset]"
             just_compressed = False
         if retriever is not None:
             note += f" [stored: {len(retriever.turns)}]"
-        parts.append(f"  (stop: {response.get('stop_reason', '?')}){note}")
+        parts.append(f"  (status: {status_label}){note}")
         print("".join(parts))
 
-        # Process response content — preserve thinking blocks for conversation history
-        content = response.get("content", [])
-        tool_calls = []
-        for block in content:
-            if block.get("type") in ("thinking", "redacted_thinking"):
-                pass  # Internal reasoning — track via usage, don't act
-            elif block.get("type") == "text":
-                final_text = block.get("text", "")
-            elif block.get("type") == "tool_use":
-                tool_calls.append(block)
-
-        # If no tool calls, agent is done — record the final assistant turn
-        if response.get("stop_reason") == "end_turn" or not tool_calls:
-            messages.append({"role": "assistant", "content": content})
+        if not tool_calls:
+            messages.extend(append_items)
             break
 
-        # Execute tools and build tool_result messages
-        # Preserve full content (including thinking blocks) — API requires them
-        assistant_msg = {"role": "assistant", "content": content}
-        messages.append(assistant_msg)
+        messages.extend(append_items)
 
-        tool_results = []
+        raw_tool_outputs = []
         for tc in tool_calls:
             tool_name = tc.get("name", "")
             tool_input = tc.get("input", {})
-            tool_id = tc.get("id", "")
+            call_id = tc.get("call_id", "")
 
             print(f"    -> {tool_name}({_summarize_input(tool_name, tool_input)})")
             result_text = _execute_tool(tool_name, tool_input, project_dir)
-
-            tool_results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": tool_id,
-                    "content": result_text,
-                }
+            raw_tool_outputs.append(
+                _build_tool_output_item(provider, call_id, result_text)
             )
 
-        messages.append({"role": "user", "content": tool_results})
+        if provider == "anthropic":
+            output_append_items = [{"role": "user", "content": raw_tool_outputs}]
+        else:
+            output_append_items = raw_tool_outputs
+        messages.extend(output_append_items)
 
-        # Store turn in retriever (before potential retrieval replaces messages)
         if retriever is not None:
-            retriever.store_turn(turn + 1, assistant_msg, tool_results)
+            assistant_for_retriever = (
+                append_items[0] if provider == "anthropic" else append_items
+            )
+            retriever.store_turn(
+                turn + 1,
+                assistant_for_retriever,
+                raw_tool_outputs,
+            )
 
-        # Check if we should compress/retrieve (use total input for threshold)
         if (
             compression_mode == "retrieval"
             and total_input_this_turn > compression_threshold
@@ -604,6 +990,7 @@ def run_agent(
                 mode=compression_mode,
                 api_key=api_key,
                 ollama_model=compression_model,
+                api_provider=provider,
             )
             compressions.append(
                 {
@@ -614,7 +1001,7 @@ def run_agent(
                 }
             )
             messages = new_messages
-            just_compressed = True  # Next turn will note cache invalidation
+            just_compressed = True
             print(
                 f"  Compressed: {total_input_this_turn:,} -> "
                 f"~{comp_metrics.get('tokens_after', 0):,} tokens"
@@ -629,7 +1016,6 @@ def run_agent(
     total_cache_creation = sum(per_turn_cache_creation)
     total_thinking = sum(per_turn_thinking)
 
-    # Cost: input_tokens from API is uncached; derive from totals
     total_uncached = total_input - total_cache_read - total_cache_creation
     cost = calculate_cost(
         total_uncached,
@@ -637,6 +1023,8 @@ def run_agent(
         total_cache_read,
         total_cache_creation,
         total_thinking,
+        provider=provider,
+        model=model,
     )
 
     if transcript_path:
@@ -645,7 +1033,17 @@ def run_agent(
             if parent:
                 os.makedirs(parent, exist_ok=True)
             with open(transcript_path, "w", encoding="utf-8") as f:
-                f.write(json.dumps({"role": "system", "content": SYSTEM_PROMPT}) + "\n")
+                f.write(
+                    json.dumps(
+                        {
+                            "role": "system",
+                            "provider": provider,
+                            "model": model,
+                            "content": SYSTEM_PROMPT,
+                        }
+                    )
+                    + "\n"
+                )
                 for msg in messages:
                     f.write(json.dumps(msg) + "\n")
         except OSError as e:
@@ -654,6 +1052,8 @@ def run_agent(
     return {
         "status": status,
         "summary": final_text[:2000],
+        "provider": provider,
+        "model": model,
         "total_input_tokens": total_input,
         "total_output_tokens": total_output,
         "total_cache_read_tokens": total_cache_read,
@@ -674,6 +1074,8 @@ def run_agent(
 
 def _summarize_input(tool_name: str, tool_input: dict) -> str:
     """Short summary of tool input for logging."""
+    if "_raw_arguments" in tool_input:
+        return "invalid JSON"
     if tool_name == "read_file":
         return tool_input.get("path", "?")
     elif tool_name == "write_file":

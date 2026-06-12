@@ -1,10 +1,12 @@
 # Bearing
 
-Planning and execution shouldn't share a context window.
+Bearing is a small task runner for directing AI coding agents with a human in the planning loop. It keeps the planning conversation separate from execution: you debate the work, translate intent into precise tasks, and then Bearing runs each task in its own fresh agent process.
 
-Bearing separates the two. You have a strategic conversation with an AI planner about *what* to build. Bearing runs the tasks in fresh, isolated sessions. Results come back as files. No copy-pasting between windows.
+It is meant for codebase work where a single long agent session starts to get noisy. The task queue is both a project-management tool and a context-management tool: it records what should happen, what depends on what, which files matter, and what context should carry forward.
 
-Works with Claude Code, Codex, or any CLI agent.
+Bearing works with Claude Code, Codex, and custom CLI commands. It also includes an experimental API-backed agent that can use OpenAI Responses or Anthropic Messages directly.
+
+For the longer motivation behind the workflow, see [Why I stopped copy-pasting between AI coding sessions](https://rocketvish.substack.com/p/why-i-stopped-copy-pasting-between).
 
 ## Install
 
@@ -14,109 +16,54 @@ cd bearing
 uv tool install -e .
 ```
 
-Requires Python 3.11+ and at least one CLI agent (Claude Code, Codex, etc.) in PATH. No other dependencies.
+You need Python 3.11+ and at least one CLI agent in `PATH`, unless you are only using the standalone API agent.
 
-## Usage
+## Basic Flow
+
+From the project you want to work on:
 
 ```bash
-cd your-project
 bearing start .
 ```
 
-This opens an interactive Claude Code session (Opus) that knows how to write Bearing task files. Talk through what you want to build. When you converge on a plan, the planner writes `tasks.json`. Then, from within the same session:
+Use the planner to talk through the work, challenge the approach, and decide where human judgment matters. The planner writes those decisions into `tasks.json`. When the plan is ready, run:
 
-```
-!bearing run .
-```
-
-Tasks execute one by one in separate processes. Each gets a clean context window. Results write to `status.md`. Check progress anytime:
-
-```
-!bearing summary .
+```bash
+bearing run .
 ```
 
-One window, files as the interface.
+Bearing reads the queue, runs ready tasks one at a time, and writes progress to `status.md`. You can check the current state without starting a run:
 
-## How It Works
-
-```
-You (planner session)     Bearing         CLI Agent (executor)
----------------------     -------         --------------------
-Discuss approach     ->   writes tasks.json
-                          reads task       ->   claude -p / codex "prompt..."
-Read status.md       <-   writes status.md <-   returns result
-Adjust plan          ->   picks up next    ->   next task...
+```bash
+bearing summary .
+bearing status .
 ```
 
-Four files, all in your project directory:
+## Files
 
-- **tasks.json** -- the task queue. Bearing reads this, you (or the planner) write it.
-- **status.md** -- Bearing writes this. Results, costs, errors.
-- **plan.md** -- your scratch space. Bearing ignores it.
-- **CLAUDE.md** -- unchanged. Still your project context.
+Bearing uses ordinary project files as its interface:
 
-## Multi-CLI Support
+- `tasks.json` is the task queue.
+- `status.md` is generated from task results.
+- `plan.md` is optional scratch space for planning.
+- `CLAUDE.md` or `AGENTS.md` remain normal agent context files; Bearing does not own them.
 
-Each task specifies which CLI agent runs it:
+## Task Queue
 
-```json
-{
-  "config": {
-    "cli": "claude",
-    "model": "opus"
-  }
-}
-```
-
-Use Claude with Opus for architectural decisions, Sonnet for routine implementation, Codex for a different perspective, or mix them in the same task queue. The planner decides which tool fits each task.
-
-Supported CLIs: `claude` (full flag support), `codex` (basic), or any custom command.
-
-## Context Focusing
-
-The highest-leverage feature. Instead of the executor reading your entire codebase and hoping attention lands in the right place, tell it exactly what matters:
-
-```json
-{
-  "relevant_files": ["src/hooks/useAuth.js", "src/components/Login.jsx"],
-  "ignore_patterns": ["node_modules", "dist", "*.test.js"]
-}
-```
-
-The executor sees focused directives before the task prompt:
-```
-FOCUS: Read these files first, they are most relevant: src/hooks/useAuth.js, src/components/Login.jsx
-SKIP: Do not read or modify these: node_modules, dist, *.test.js
-```
-
-This reduces token consumption and concentrates the model's attention on what actually matters. When a task completes, its relevant_files automatically propagate to dependent tasks.
-
-## Auto-Context
-
-When task-001 completes, Bearing injects a summary into every dependent task:
-
-```
-[task-001: Add auth hook] Created useAuth hook at src/hooks/useAuth.js...
-```
-
-Both the text summary and the file relevance list propagate. No manual copy-paste. No duplication on re-runs.
-
-## Task Format
+A task describes what to run, which files matter, and how it relates to other tasks:
 
 ```json
 {
   "id": "task-001",
   "name": "Add user settings page",
-  "prompt": "Read the current codebase first -- especially the files in FOCUS...",
+  "prompt": "Add a settings page and tests. Read the focused files first.",
   "config": {
     "cli": "claude",
     "model": "sonnet",
     "effort": "high",
-    "budget_usd": 3.00,
+    "budget_usd": 3.0,
     "max_turns": 20,
-    "permission_mode": "auto",
-    "worktree": null,
-    "fast_mode": false
+    "permission_mode": "auto"
   },
   "depends_on": [],
   "checkpoint": "pause",
@@ -127,28 +74,58 @@ Both the text summary and the file relevance list propagate. No manual copy-past
 }
 ```
 
+The planner can write this by hand, or you can create it yourself. `bearing validate .` checks that the file is shaped correctly.
+
+## Context Focusing
+
+Tasks can name files that are likely to matter:
+
+```json
+{
+  "relevant_files": ["src/hooks/useAuth.js", "src/components/Login.jsx"],
+  "ignore_patterns": ["node_modules", "dist", "*.test.js"]
+}
+```
+
+Bearing turns those fields into instructions at the top of the executor prompt. This does not stop the agent from reading other files, but it gives the run a better starting point and makes the intended scope clear.
+
+When a task completes, its summary and relevant files are propagated to dependent tasks. Later tasks get the parts of the prior work that should matter, without inheriting the entire conversation, test output, and error history.
+
 ## Commands
 
+```bash
+bearing start .        Open a planner session
+bearing init .         Create starter files
+bearing run .          Execute queued tasks
+bearing summary .      Show a short progress summary
+bearing status .       Show full task status
+bearing watch .        Watch task status updates
+bearing validate .     Validate tasks.json
+bearing eval .         Run context-format evals
+bearing eval-compare . Compare isolated tasks with a single accumulated session
+bearing eval-agent .   Run standalone-agent compression/retrieval evals
 ```
-bearing start .       Open a planner session (Opus)
-bearing init .        Create starter files
-bearing run .         Execute queued tasks
-bearing summary .     One-line progress check
-bearing status .      Full status
-bearing watch .       Live-tail task changes
-bearing validate .    Check tasks.json syntax
+
+## Agent Choices
+
+Normal tasks run through CLI agents. A task can choose a built-in CLI or a custom command:
+
+```json
+{
+  "config": {
+    "cli": "codex",
+    "model": "gpt-5.5"
+  }
+}
 ```
 
-## Agent Mode
+The standalone API agent in `agent.py` is separate from the CLI runner. It exists to test context-management ideas without depending on a particular CLI product. It exposes the same three local tools to models:
 
-Bearing includes a standalone tool-use agent (`agent.py`) that calls the Anthropic API directly via urllib with three tools: `read_file`, `write_file`, `run_command`. No SDK dependency.
+- `read_file(path)`
+- `write_file(path, content)`
+- `run_command(command)`
 
-Features:
-- **Prompt caching**: Cache breakpoints on system prompt, last tool definition, and last message. Cache reads cost 0.1x input price.
-- **Extended thinking**: Optional thinking budget (10K tokens) for complex reasoning. Thinking blocks preserved in history for API continuity.
-- **Mid-conversation compression**: When input tokens exceed a threshold, compress history via API summarization (lossy) or selective retrieval (lossless).
-- **Selective retrieval**: Embeds each conversation turn via Ollama (nomic-embed-text), retrieves only the top-K most relevant turns by cosine similarity. Kept turns are verbatim -- no information loss on retained context.
-- **Command blocklist**: Blocks server-starting commands (`npm start`, `node server.js`, `index.js`) at the tool level to prevent agent hangs.
+OpenAI Responses is the default backend. Anthropic Messages is still supported through the same normalized loop:
 
 ```python
 from agent import run_agent
@@ -156,26 +133,35 @@ from agent import run_agent
 result = run_agent(
     task_prompt="Build a REST API with tests",
     project_dir="./my-project",
-    compression_mode="retrieval",  # "none", "api", "ollama", or "retrieval"
+    provider="openai",  # or "anthropic"
+    compression_mode="retrieval",
     use_caching=True,
-    use_thinking=True,
+    reasoning_effort="high",
 )
 ```
 
-## Eval Framework
+For `bearing eval-agent`, set `BEARING_AGENT_PROVIDER` and `BEARING_AGENT_MODEL` to compare backends.
 
-Bearing ships with evaluation tools for measuring context management strategies:
+Review `tasks.json` before running it. Bearing executes the configured CLI command in your project directory, and the standalone API agent has a `run_command` tool for tests and inspection. The API agent confines file reads and writes to the project root and blocks a small set of destructive command patterns, but it is still a code-execution tool.
 
-- **`bearing eval`** -- 4-condition context format comparison (prose, structured, embedding, embedding+llm)
-- **`bearing eval-compare`** -- Bearing's 8-session task isolation vs single mega-prompt session
-- **`bearing eval-agent`** -- 7-condition agent eval: raw, compressed, cached, compressed+cached, retrieval, retrieval+cached, and claude-p baseline
+## Design Choices
 
-The agent eval runs all 8 tasks as a single mega-prompt to force context accumulation past compression/retrieval thresholds. Reports include per-turn token tables, compression sawtooth patterns, retrieval score distributions, cost breakdowns with cached pricing, and per-task quality judgments.
+Bearing tries to keep the project model simple:
 
-## What This Is Not
+- Planning produces files instead of hidden session state.
+- Execution happens in isolated runs so one task's context does not silently become another task's baggage.
+- Context is passed forward deliberately through task summaries, dependencies, and focused file lists. This is a rough form of human-guided compression: the planner helps decide what context is still important instead of leaving that entirely to an automatic summary.
+- Human review remains part of the loop. Tasks can pause at checkpoints, and the planner can adjust the queue based on `status.md`.
+- Provider-specific API shapes stay behind adapters where possible. OpenAI Responses has richer agent primitives than the Anthropic Messages API, but Bearing's internal loop should not require one provider's object model.
 
-Not Conductor (the Mac app for parallel agents). Not Gas Town (20-agent swarms). Not gstack (role-switching within one session).
+The tradeoff is that Bearing is more explicit than a single long agent session. You have to maintain a queue, name dependencies, and decide where context should flow. That cost is the point when the work is large enough that your original intent starts competing with everything else the agent has seen.
 
-Those tools answer "how do I run more agents?" Bearing answers a different question: "how do I think clearly about what to build while AI builds it?"
+## Evaluation
 
-Pure Python, no UI or external dependencies beyond the Anthropic API and optionally Ollama. Uses standard MIT license.
+The eval scripts are for comparing context-management strategies, not for proving a universal ranking between models. Current evals include:
+
+- `bearing eval`: context format comparison.
+- `bearing eval-compare`: isolated task sessions versus one accumulated mega-prompt.
+- `bearing eval-agent`: standalone API agent with raw history, compression, caching, retrieval, and combinations of those modes.
+
+Results are noisy because agent runs are noisy. The reports are most useful for spotting broad patterns, checking whether compression or retrieval changes the token curve, and finding cases where a strategy loses task detail.

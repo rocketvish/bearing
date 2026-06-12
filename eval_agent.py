@@ -1,7 +1,7 @@
 """
 Bearing - Eval: Agent Compression & Retrieval
 
-Runs all 8 tasks as a single mega-prompt agent session under seven conditions:
+Runs all 8 tasks as a single mega-prompt API-backed agent session under seven conditions:
     1. agent-raw              — No compression, no caching (baseline)
     2. agent-compressed       — API compression at threshold
     3. agent-cached           — Prompt caching, no compression
@@ -26,7 +26,14 @@ import sys
 import time
 from datetime import datetime
 
-from agent import run_agent
+from agent import (
+    COST_CACHE_CREATION_PER_MTOK,
+    COST_CACHE_READ_PER_MTOK,
+    COST_INPUT_PER_MTOK,
+    COST_OUTPUT_PER_MTOK,
+    pricing_for,
+    run_agent,
+)
 from eval_compare import build_mega_prompt
 from eval_runner import (
     capture_source_files,
@@ -53,6 +60,8 @@ CONDITIONS = [
 AGENT_MAX_TURNS = 80
 COMPRESSION_THRESHOLD = 12000
 COOLDOWN_SECONDS = 90
+AGENT_PROVIDER = os.environ.get("BEARING_AGENT_PROVIDER", "openai")
+AGENT_MODEL = os.environ.get("BEARING_AGENT_MODEL")
 
 
 def _run_agent_condition(
@@ -77,6 +86,8 @@ def _run_agent_condition(
     result = run_agent(
         task_prompt=mega_prompt,
         project_dir=project_dir,
+        provider=AGENT_PROVIDER,
+        model=AGENT_MODEL,
         compression_mode=compression_mode,
         compression_threshold=COMPRESSION_THRESHOLD,
         max_turns=AGENT_MAX_TURNS,
@@ -88,6 +99,8 @@ def _run_agent_condition(
 
     return {
         "condition": condition,
+        "provider": result.get("provider", AGENT_PROVIDER),
+        "model": result.get("model", AGENT_MODEL),
         "status": result["status"],
         "total_input_tokens": result["total_input_tokens"],
         "total_output_tokens": result["total_output_tokens"],
@@ -349,7 +362,7 @@ def _write_report(
         ("Total output tokens", "total_output_tokens", lambda x: f"{x:,}"),
         ("Cache Read Tokens", "total_cache_read_tokens", lambda x: f"{x:,}"),
         ("Cache Creation Tokens", "total_cache_creation_tokens", lambda x: f"{x:,}"),
-        ("Thinking Tokens", "total_thinking_tokens", lambda x: f"{x:,}"),
+        ("Reasoning Tokens", "total_thinking_tokens", lambda x: f"{x:,}"),
         ("Cost USD", "cost_usd", lambda x: f"${x:.4f}"),
         ("Turns", "turns_used", str),
         ("Wall time", "wall_time_s", lambda x: f"{x:.0f}s"),
@@ -409,12 +422,22 @@ def _write_report(
         uncached = total_in - cache_read - cache_creation
         output = r.get("total_output_tokens", 0)
         thinking = r.get("total_thinking_tokens", 0)
+        pricing = pricing_for(r.get("provider", "openai"), r.get("model"))
+        input_price = pricing.get("input", COST_INPUT_PER_MTOK)
+        cached_price = pricing.get("cached_input", COST_CACHE_READ_PER_MTOK)
+        cache_creation_price = pricing.get(
+            "cache_creation", COST_CACHE_CREATION_PER_MTOK
+        )
+        output_price = pricing.get("output", COST_OUTPUT_PER_MTOK)
+        bill_reasoning_separately = pricing.get("reasoning_billed_separately", False)
 
-        c_uncached = uncached * 3.00 / 1_000_000
-        c_cache_read = cache_read * 0.30 / 1_000_000
-        c_cache_creation = cache_creation * 3.75 / 1_000_000
-        c_output = output * 15.00 / 1_000_000
-        c_thinking = thinking * 15.00 / 1_000_000
+        c_uncached = uncached * input_price / 1_000_000
+        c_cache_read = cache_read * cached_price / 1_000_000
+        c_cache_creation = cache_creation * cache_creation_price / 1_000_000
+        c_output = output * output_price / 1_000_000
+        c_thinking = (
+            thinking * output_price / 1_000_000 if bill_reasoning_separately else 0
+        )
         c_total = c_uncached + c_cache_read + c_cache_creation + c_output + c_thinking
 
         lines.extend(
@@ -422,15 +445,16 @@ def _write_report(
                 f"### {cond}",
                 "```",
                 f"Input (uncached): {uncached:>8,} tokens"
-                f" x $3.00/MTok = ${c_uncached:.4f}",
+                f" x ${input_price:.2f}/MTok = ${c_uncached:.4f}",
                 f"Cache reads:      {cache_read:>8,} tokens"
-                f" x $0.30/MTok = ${c_cache_read:.4f}",
+                f" x ${cached_price:.2f}/MTok = ${c_cache_read:.4f}",
                 f"Cache writes:     {cache_creation:>8,} tokens"
-                f" x $3.75/MTok = ${c_cache_creation:.4f}",
+                f" x ${cache_creation_price:.2f}/MTok = "
+                f"${c_cache_creation:.4f}",
                 f"Output:           {output:>8,} tokens"
-                f" x $15.00/MTok = ${c_output:.4f}",
-                f"Thinking:         {thinking:>8,} tokens"
-                f" x $15.00/MTok = ${c_thinking:.4f}",
+                f" x ${output_price:.2f}/MTok = ${c_output:.4f}",
+                f"Reasoning:        {thinking:>8,} tokens"
+                f" x ${output_price:.2f}/MTok = ${c_thinking:.4f}",
                 f"Total:            ${c_total:.4f}",
                 "```",
                 "",
@@ -471,7 +495,7 @@ def _write_report(
                 hdr += " Cached |"
                 sep_row += "--------|"
             if has_thinking:
-                hdr += " Thinking |"
+                hdr += " Reasoning |"
                 sep_row += "----------|"
             hdr += " Output | Notes |"
             sep_row += "--------|-------|"
@@ -694,10 +718,9 @@ def _write_report(
             "**Compression cost:** The compression call itself uses tokens. Net savings",
             "= (tokens saved on subsequent turns) - (compression call tokens).",
             "",
-            "**Prompt caching:** Cache reads cost 1/10th of input price. After",
-            "compression, the message cache is invalidated (system prompt cache",
-            "survives). The cost tradeoff: cache_creation costs 1.25x but subsequent",
-            "reads cost 0.1x. Net benefit depends on turns between compressions.",
+            "**Prompt caching:** `use_caching=True` enables provider-specific",
+            "prompt caching. Reports include cached token usage when the provider",
+            "returns it.",
             "",
             "**claude-p comparison:** Claude Code's internal session management is a",
             "black box — we can't see per-turn tokens, only the total. The comparison",
@@ -759,6 +782,9 @@ def run_eval_agent(project_dir: str):
     print(f"Project: {project_dir}")
     print(f"Tasks: {len(queue.tasks)} (mega-prompt, {len(mega_prompt)} chars)")
     print(f"Conditions: {', '.join(CONDITIONS)}")
+    print(f"Agent provider: {AGENT_PROVIDER}")
+    if AGENT_MODEL:
+        print(f"Agent model: {AGENT_MODEL}")
     print(f"Agent max turns: {AGENT_MAX_TURNS}")
     print(f"Compression threshold: {COMPRESSION_THRESHOLD:,} tokens")
     print()

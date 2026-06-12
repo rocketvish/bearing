@@ -7,7 +7,7 @@ the original task prompt plus the summary. This resets input token
 count from ~30-50K back to ~2-3K.
 
 Two backends:
-    api    — Compress via Anthropic API (Sonnet). Costs money, high quality.
+    api    — Compress via the configured model API. Costs money, high quality.
     ollama — Compress via local Ollama model (Gemma 4). Free, good quality.
              Falls back to api mode if Ollama is unavailable.
 """
@@ -16,8 +16,11 @@ import json
 import urllib.error
 import urllib.request
 
+OPENAI_RESPONSES_API_URL = "https://api.openai.com/v1/responses"
+OPENAI_COMPRESSION_MODEL = "gpt-5.4-mini"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
+ANTHROPIC_COMPRESSION_MODEL = "claude-sonnet-4-20250514"
 
 OLLAMA_BASE = "http://localhost:11434"
 
@@ -40,6 +43,32 @@ def _serialize_messages(messages: list[dict]) -> str:
     """
     parts = []
     for msg in messages:
+        item_type = msg.get("type", "")
+
+        # Responses API output/input items are flat in the input list.
+        if item_type == "message":
+            role = msg.get("role", "assistant")
+            for block in msg.get("content", []):
+                if isinstance(block, dict) and block.get("type") in (
+                    "output_text",
+                    "text",
+                    "input_text",
+                ):
+                    parts.append(f"[{role}]: {block.get('text', '')}")
+            continue
+        if item_type == "function_call":
+            name = msg.get("name", "?")
+            inp = msg.get("arguments", "{}")
+            parts.append(f"[assistant tool_call]: {name}({inp})")
+            continue
+        if item_type == "function_call_output":
+            result_content = msg.get("output", "")
+            if isinstance(result_content, str):
+                if len(result_content) > 1000:
+                    result_content = result_content[:1000] + "... [truncated]"
+                parts.append(f"[tool_result]: {result_content}")
+            continue
+
         role = msg.get("role", "?")
         content = msg.get("content", "")
 
@@ -70,13 +99,85 @@ def _serialize_messages(messages: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-def _compress_via_api(
+def _normalize_provider(provider: str | None) -> str:
+    value = (provider or "openai").lower()
+    aliases = {
+        "responses": "openai",
+        "openai-responses": "openai",
+        "anthropic-messages": "anthropic",
+    }
+    value = aliases.get(value, value)
+    if value not in {"openai", "anthropic"}:
+        raise ValueError("api_provider must be 'openai' or 'anthropic'")
+    return value
+
+
+def _compress_via_openai(
     conversation_text: str,
     api_key: str,
-    model: str = "claude-sonnet-4-20250514",
+    model: str = OPENAI_COMPRESSION_MODEL,
 ) -> tuple[str, dict]:
     """
-    Compress conversation using the Anthropic API.
+    Compress conversation using the OpenAI Responses API.
+    Returns (summary_text, metrics_dict).
+    """
+    user_message = f"{COMPRESSION_PROMPT}\n\nCONVERSATION:\n{conversation_text}"
+
+    body = {
+        "model": model,
+        "max_output_tokens": 2048,
+        "input": [{"role": "user", "content": user_message}],
+        "store": False,
+    }
+    payload = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        OPENAI_RESPONSES_API_URL,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Compression API error {e.code}: {error_body[:500]}"
+        ) from None
+
+    # Extract summary text
+    summary = data.get("output_text", "")
+    if not summary:
+        for item in data.get("output", []):
+            if item.get("type") != "message":
+                continue
+            for block in item.get("content", []):
+                if block.get("type") in ("output_text", "text"):
+                    summary += block.get("text", "")
+
+    usage = data.get("usage", {})
+    input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0))
+    output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0))
+    metrics = {
+        "compression_input_tokens": input_tokens,
+        "compression_output_tokens": output_tokens,
+        "compression_tokens": input_tokens + output_tokens,
+    }
+
+    return summary, metrics
+
+
+def _compress_via_anthropic(
+    conversation_text: str,
+    api_key: str,
+    model: str = ANTHROPIC_COMPRESSION_MODEL,
+) -> tuple[str, dict]:
+    """
+    Compress conversation using Anthropic Messages API.
     Returns (summary_text, metrics_dict).
     """
     user_message = f"{COMPRESSION_PROMPT}\n\nCONVERSATION:\n{conversation_text}"
@@ -107,22 +208,41 @@ def _compress_via_api(
             f"Compression API error {e.code}: {error_body[:500]}"
         ) from None
 
-    # Extract summary text
     summary = ""
     for block in data.get("content", []):
         if block.get("type") == "text":
             summary += block.get("text", "")
 
     usage = data.get("usage", {})
+    input_tokens = usage.get("input_tokens", 0)
+    output_tokens = usage.get("output_tokens", 0)
     metrics = {
-        "compression_input_tokens": usage.get("input_tokens", 0),
-        "compression_output_tokens": usage.get("output_tokens", 0),
-        "compression_tokens": (
-            usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
-        ),
+        "compression_input_tokens": input_tokens,
+        "compression_output_tokens": output_tokens,
+        "compression_tokens": input_tokens + output_tokens,
     }
 
     return summary, metrics
+
+
+def _compress_via_api(
+    conversation_text: str,
+    api_key: str,
+    provider: str = "openai",
+    model: str | None = None,
+) -> tuple[str, dict]:
+    provider = _normalize_provider(provider)
+    if provider == "anthropic":
+        return _compress_via_anthropic(
+            conversation_text,
+            api_key,
+            model or ANTHROPIC_COMPRESSION_MODEL,
+        )
+    return _compress_via_openai(
+        conversation_text,
+        api_key,
+        model or OPENAI_COMPRESSION_MODEL,
+    )
 
 
 def _compress_via_ollama(
@@ -164,6 +284,8 @@ def compress_history(
     mode: str = "api",
     api_key: str | None = None,
     ollama_model: str = "gemma4:26b",
+    api_provider: str = "openai",
+    api_model: str | None = None,
 ) -> tuple[list[dict], dict]:
     """
     Compress conversation history into a fresh single-message conversation.
@@ -171,9 +293,11 @@ def compress_history(
     Args:
         messages: Full conversation messages array
         original_task_prompt: The original task prompt to preserve
-        mode: "api" (Anthropic) or "ollama" (local Gemma)
+        mode: "api" (configured provider) or "ollama" (local Gemma)
         api_key: Required for "api" mode
         ollama_model: Model name for "ollama" mode
+        api_provider: "openai" or "anthropic" for API compression
+        api_model: Optional provider model override for API compression
 
     Returns:
         (new_messages, metrics)
@@ -203,7 +327,12 @@ def compress_history(
         if not api_key:
             print("  Error: No API key for compression. Skipping.")
             return messages, metrics
-        summary, comp_metrics = _compress_via_api(serialized, api_key)
+        summary, comp_metrics = _compress_via_api(
+            serialized,
+            api_key,
+            provider=api_provider,
+            model=api_model,
+        )
         metrics["compression_tokens"] = comp_metrics.get("compression_tokens", 0)
 
     if not summary:

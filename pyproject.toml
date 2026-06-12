@@ -1,7 +1,7 @@
 [project]
 name = "bearing"
 version = "0.1.0"
-description = "Planning-to-execution orchestrator for Claude Code"
+description = "Planning-to-execution orchestrator for CLI coding agents"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 

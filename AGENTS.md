@@ -1,4 +1,4 @@
-# Bearing - Task Orchestrator for CLI Agents
+# Bearing - Task Orchestrator for Codex
 
 ## Architecture
 
@@ -10,7 +10,7 @@
 - `agent.py` -- Tool-use agent via provider adapters (OpenAI Responses or Anthropic Messages, urllib/no SDK), with prompt caching + reasoning effort
 - `compressor.py` -- Mid-conversation history compression (API or Ollama backends)
 - `retriever.py` -- Embedding-based selective history retrieval via Ollama (nomic-embed-text)
-- `eval_agent.py` -- Eval: agent with/without compression/caching/retrieval vs claude -p (7 conditions)
+- `eval_agent.py` -- Eval: agent with/without compression/caching/retrieval vs Codex -p (7 conditions)
 - `test_sanity.py` -- Quick sanity test for caching + reasoning features
 - `tasks_schema.py` -- Dataclasses for Task, TaskQueue, TaskResult
 - `status_writer.py` -- Generates status.md from task queue state
@@ -35,7 +35,7 @@ Default thresholds are set at keep=0.75, drop=0.55 to account for this. Benchmar
 need chunks to actually drop require genuinely unrelated domains (e.g., different languages
 or problem spaces), not just "parallel feature tracks" in the same codebase.
 
-**Injected context is <0.1% of total tokens.** Claude Code `claude -p` sessions consume
+**Injected context is <0.1% of total tokens.** Codex `Codex -p` sessions consume
 100K-300K tokens reading files, writing code, and running tests. Our injected context is
 ~50-300 tokens. Cost differences between conditions are dominated by execution
 non-determinism, not context size. The value of context compression is in compaction
@@ -60,7 +60,7 @@ Seven conditions: `agent-raw` (no compression, no caching), `agent-compressed` (
 compression at 12K threshold), `agent-cached` (prompt caching, no compression),
 `agent-compressed-cached` (both compression + caching), `agent-retrieval`
 (embedding-based selective history retrieval via Ollama), `agent-retrieval-cached`
-(retrieval + prompt caching), `claude-p` (loads cached results from eval-compare if
+(retrieval + prompt caching), `Codex-p` (loads cached results from eval-compare if
 available, otherwise runs fresh). Key output: per-turn input token table showing
 accumulation curves, cache hit rates, compression sawtooth, and retrieval drops.
 Report includes per-condition cost breakdowns, retrieval analysis (score distribution,
@@ -110,7 +110,7 @@ bearing watch <dir>         # Live updates
 
 ## Development
 
-- Python 3.12+, no external dependencies (stdlib only + OpenAI HTTP API + Ollama HTTP API)
+- Python 3.12+, no external dependencies (stdlib only + OpenAI/Anthropic HTTP APIs + Ollama HTTP API)
 - Lint: `ruff check .`
 - Format: `ruff format .`
 - Tests: `python -m pytest` (if test files exist)

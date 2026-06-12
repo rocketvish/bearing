@@ -1,4 +1,4 @@
-"""Quick sanity test for prompt caching and extended thinking."""
+"""Quick sanity test for prompt caching and reasoning effort."""
 
 import os
 import shutil
@@ -10,7 +10,7 @@ def main():
     project_dir = os.path.dirname(os.path.abspath(__file__))
 
     print("=" * 60)
-    print("Sanity Test: Prompt Caching + Extended Thinking")
+    print("Sanity Test: Prompt Caching + Reasoning")
     print("=" * 60)
 
     result = run_agent(
@@ -21,7 +21,7 @@ def main():
         project_dir=project_dir,
         max_turns=5,
         use_caching=True,
-        use_thinking=True,
+        reasoning_effort="high",
     )
 
     print(f"\n{'=' * 60}")
@@ -33,7 +33,7 @@ def main():
     print(f"Total output: {result['total_output_tokens']:,}")
     print(f"Total cache read: {result['total_cache_read_tokens']:,}")
     print(f"Total cache creation: {result['total_cache_creation_tokens']:,}")
-    print(f"Total thinking: {result['total_thinking_tokens']:,}")
+    print(f"Total reasoning: {result['total_thinking_tokens']:,}")
     print(f"Cost: ${result['cost_usd']:.4f}")
 
     print("\nPer-turn breakdown:")
@@ -45,7 +45,7 @@ def main():
         th = result["per_turn_thinking_tokens"][i]
         print(
             f"  Turn {i + 1}: in={inp:,} (cached={cr:,}, created={cc:,}) "
-            f"out={out:,} thinking={th:,}"
+            f"out={out:,} reasoning={th:,}"
         )
 
     # Verify cache reads on turn 2+

@@ -54,41 +54,69 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
-def _serialize_turn(assistant_message: dict, tool_results: list[dict]) -> str:
+def _parse_arguments(raw_arguments: object) -> dict:
+    if isinstance(raw_arguments, dict):
+        return raw_arguments
+    if not isinstance(raw_arguments, str):
+        return {}
+    try:
+        parsed = json.loads(raw_arguments)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _serialize_call(name: str, inp: dict) -> str:
+    if name == "read_file":
+        return f"read_file({inp.get('path', '')})"
+    if name == "write_file":
+        path = inp.get("path", "")
+        content_preview = inp.get("content", "")[:200]
+        return f"write_file({path}): {content_preview}"
+    if name == "run_command":
+        return f"run_command: {inp.get('command', '')}"
+    return f"{name}({json.dumps(inp)[:200]})"
+
+
+def _serialize_turn(assistant_message: dict | list[dict], tool_results: list[dict]) -> str:
     """
     Serialize a single turn (assistant response + tool results) into a
     text string suitable for embedding.
     """
     parts = []
 
-    # Extract text and tool calls from assistant message
-    content = assistant_message.get("content", [])
-    if isinstance(content, list):
-        for block in content:
-            if isinstance(block, dict):
-                btype = block.get("type", "")
-                if btype == "text":
-                    parts.append(block.get("text", ""))
-                elif btype == "tool_use":
-                    name = block.get("name", "?")
-                    inp = block.get("input", {})
-                    # Include tool name and key input for embedding
-                    if name == "read_file":
-                        parts.append(f"read_file({inp.get('path', '')})")
-                    elif name == "write_file":
-                        path = inp.get("path", "")
-                        content_preview = inp.get("content", "")[:200]
-                        parts.append(f"write_file({path}): {content_preview}")
-                    elif name == "run_command":
-                        parts.append(f"run_command: {inp.get('command', '')}")
-                    else:
-                        parts.append(f"{name}({json.dumps(inp)[:200]})")
-    elif isinstance(content, str):
-        parts.append(content)
+    if isinstance(assistant_message, list):
+        for item in assistant_message:
+            item_type = item.get("type", "")
+            if item_type == "message":
+                for block in item.get("content", []):
+                    if isinstance(block, dict) and block.get("type") in (
+                        "output_text",
+                        "text",
+                    ):
+                        parts.append(block.get("text", ""))
+            elif item_type == "function_call":
+                name = item.get("name", "?")
+                inp = _parse_arguments(item.get("arguments", "{}"))
+                parts.append(_serialize_call(name, inp))
+    else:
+        content = assistant_message.get("content", [])
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    btype = block.get("type", "")
+                    if btype == "text":
+                        parts.append(block.get("text", ""))
+                    elif btype == "tool_use":
+                        name = block.get("name", "?")
+                        inp = block.get("input", {})
+                        parts.append(_serialize_call(name, inp))
+        elif isinstance(content, str):
+            parts.append(content)
 
     # Include tool results (truncated)
     for tr in tool_results:
-        result_content = tr.get("content", "")
+        result_content = tr.get("output", tr.get("content", ""))
         if isinstance(result_content, str) and result_content:
             parts.append(result_content[:500])
 
@@ -115,7 +143,7 @@ class TurnRetriever:
     def store_turn(
         self,
         turn_number: int,
-        assistant_message: dict,
+        assistant_message: dict | list[dict],
         tool_results: list[dict],
     ):
         """
@@ -225,10 +253,15 @@ class TurnRetriever:
         new_messages = [{"role": "user", "content": original_task_prompt}]
 
         for turn in selected:
-            # Add assistant message
-            new_messages.append(turn["assistant_message"])
-            # Add tool results as user message
-            if turn["tool_results"]:
-                new_messages.append({"role": "user", "content": turn["tool_results"]})
+            assistant_message = turn["assistant_message"]
+            if isinstance(assistant_message, list):
+                new_messages.extend(assistant_message)
+                new_messages.extend(turn["tool_results"])
+            else:
+                new_messages.append(assistant_message)
+                if turn["tool_results"]:
+                    new_messages.append(
+                        {"role": "user", "content": turn["tool_results"]}
+                    )
 
         return new_messages, metrics
